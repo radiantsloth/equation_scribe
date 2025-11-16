@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: equation-scribe
+Version: 0.0.1
+Summary: Human-in-the-loop technical paper reader: PDF ingest + LaTeX validator
+Author: Team Spangler
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: pillow
+Requires-Dist: pdfplumber
+Requires-Dist: pymupdf
+Requires-Dist: sympy==1.14.0
+Requires-Dist: antlr4-python3-runtime==4.11
+
+# equation-scribe
+
+Minimal package for Spiral 0: PDF ingestion and LaTeX validation.
+
+## Dev install (editable)
+```bash
+pip install -e .
+```
+
+## Run tests
+```bash
+pytest -q
+```

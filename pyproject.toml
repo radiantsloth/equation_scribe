@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "equation-scribe"
+version = "0.0.1"
+description = "Human-in-the-loop technical paper reader: PDF ingest + LaTeX validator"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Team Spangler"}]
+dependencies = [
+    "pillow",
+    "pdfplumber",
+    "pymupdf",
+    "sympy==1.14.0",
+    "antlr4-python3-runtime==4.11",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]

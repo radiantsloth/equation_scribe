@@ -1,0 +1,5 @@
+data
+equation_scribe
+notebooks
+src
+tests
