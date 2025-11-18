@@ -1,5 +1,5 @@
 # equation-scribe
-
+.
 Human-in-the-loop technical paper reader: PDF ingest + LaTeX validator.
 
 ## Project layout
