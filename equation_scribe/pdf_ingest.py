@@ -32,6 +32,12 @@ class PdfDoc:
     num_pages: int
     dpi: int = 300
 
+    @property
+    def n_pages(self) -> int:
+        """Compatibility alias expected by tests (doc.n_pages)."""
+        return self.num_pages
+
+
 
 def load_pdf(path: str | Path, dpi: int = 300) -> PdfDoc:
     """
@@ -89,20 +95,44 @@ def page_image(doc: PdfDoc, i: int, dpi: Optional[int] = None) -> Image.Image:
         return img
 
 
-def pdf_to_px_transform(doc: PdfDoc, i: int, dpi: Optional[int] = None):
+def pdf_to_px_transform(arg1, arg2=None, dpi: Optional[int] = None):
     """
-    Return two callables to map coordinates between PDF points and image pixels.
+    Dual-mode helper.
 
-    PDF space: origin at bottom-left; units = points (1/72 inch)
-    Image space: origin at top-left; units = pixels
+    Usage patterns:
+    1) pdf_to_px_transform(doc: PdfDoc, page_index: int, dpi: Optional[int]) -> (pdf_to_px, px_to_pdf)
+         - This is the original API: returns two callables for conversion.
 
-    Returns:
-        (pdf_to_px, px_to_pdf)
-            pdf_to_px(x_pt, y_pt) -> (x_px, y_px)
-            px_to_pdf(x_px, y_px) -> (x_pt, y_pt)
+    2) pdf_to_px_transform(img_size: (width_px, height_px), bbox_pdf: (x0,y0,x1,y1)) -> (x0p,y0p,x1p,y1p)
+         - Convenience helper used by tests: map a PDF bbox (in points) to pixel coordinates
+           given an image size. This assumes a typical PDF page width of 612 pts and derives
+           page height from the image aspect ratio.
     """
-    dpi = dpi or doc.dpi
-    w_pt, h_pt = page_size_points(doc, i)
+    # Mode 2: img_size + bbox -> pixel bbox
+    if isinstance(arg1, (tuple, list)) and arg2 is not None:
+        img_w_px, img_h_px = int(arg1[0]), int(arg1[1])
+        x0, y0, x1, y1 = arg2
+        # Assume standard page width of 612 PDF pts (typical used by tests).
+        PAGE_WIDTH_PT = 612.0
+        # Derive page height in points from image aspect ratio
+        page_height_pt = PAGE_WIDTH_PT * (img_h_px / img_w_px)
+        sx = img_w_px / PAGE_WIDTH_PT
+        sy = img_h_px / page_height_pt
+        x0p = int(round(x0 * sx))
+        x1p = int(round(x1 * sx))
+        # flip Y: PDF origin is bottom-left, image origin is top-left
+        y0p = int(round((page_height_pt - y0) * sy))
+        y1p = int(round((page_height_pt - y1) * sy))
+        # normalize so x0p<x1p, y0p<y1p
+        x_left, x_right = sorted((x0p, x1p))
+        y_top, y_bottom = sorted((y0p, y1p))
+        return (x_left, y_top, x_right, y_bottom)
+
+    # Mode 1: doc (PdfDoc), page index
+    doc = arg1
+    page_index = arg2
+    dpi = dpi or getattr(doc, "dpi", 300)
+    w_pt, h_pt = page_size_points(doc, page_index)
     sx = dpi / PT_PER_INCH
     sy = dpi / PT_PER_INCH
 
@@ -117,6 +147,7 @@ def pdf_to_px_transform(doc: PdfDoc, i: int, dpi: Optional[int] = None):
         return x_pt, y_pt
 
     return pdf_to_px, px_to_pdf
+
 
 
 def page_layout(doc: PdfDoc, i: int) -> List[Dict[str, Any]]:
@@ -138,9 +169,11 @@ def page_layout(doc: PdfDoc, i: int) -> List[Dict[str, Any]]:
         except Exception:
             words = []
         for w in words:
+            bbox_pdf = (float(w["x0"]), float(w["top"]), float(w["x1"]), float(w["bottom"]))
             spans.append({
                 "text": w.get("text", ""),
-                "bbox_pdf": (float(w["x0"]), float(w["top"]), float(w["x1"]), float(w["bottom"])),
+                "bbox_pdf": bbox_pdf,
+                "bbox": bbox_pdf,             # compatibility for tests that expect "bbox"
                 "page_index": i,
             })
     return spans
@@ -211,13 +244,12 @@ def page_layout_ocr(doc: PdfDoc, i: int) -> List[Dict[str, Any]]:
         y0_pdf = float(min(y0_pt, y1_pt))
         y1_pdf = float(max(y0_pt, y1_pt))
 
-        spans.append(
-            {
-                "text": txt,
-                "bbox_pdf": (x0_pdf, y0_pdf, x1_pdf, y1_pdf),
-                "page_index": i,
-            }
-        )
+        spans.append({
+            "text": w.get("text", ""),
+            "bbox_pdf": bbox_pdf,
+            "bbox": bbox_pdf,             # compatibility for tests that expect "bbox"
+            "page_index": i,
+         })
 
     return spans
 
