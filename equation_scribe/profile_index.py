@@ -102,6 +102,7 @@ def register_paper(
     entry = papers.get(paper_id, {})
     created_at = entry.get("created_at", now)
 
+    pdf_basename = pdf_basename.lower()
     entry.update(
         {
             "paper_id": paper_id,
