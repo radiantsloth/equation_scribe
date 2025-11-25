@@ -51,7 +51,7 @@ def find_equation_candidates(spans: List[Dict[str, Any]], page_width: float) -> 
         centered_bonus = max(0.0, 0.3 - center_dev)  # bonus if near center
 
         total = score + centered_bonus
-        if total >= 0.6:  # tune this threshold
+        if total >= 0.1:  # tune this threshold
             candidates.append({"text": text, "bbox_pdf": (x0, y0, x1, y1), "score": round(total, 3)})
 
     # sort strongest first
