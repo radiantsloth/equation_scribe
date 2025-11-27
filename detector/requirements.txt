@@ -1,0 +1,9 @@
+# minimal required packages for detector scripts
+ultralytics>=8.0.113
+opencv-python-headless
+Pillow
+pycocotools
+matplotlib
+pdf2image
+pillow
+tqdm

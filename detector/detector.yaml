@@ -1,0 +1,6 @@
+# dataset descriptor for ultralytics (YOLOv8)
+path: detector/data
+train: images/train
+val: images/val
+nc: 2
+names: ['display','inline']
