@@ -7,3 +7,5 @@ matplotlib
 pdf2image
 pillow
 tqdm
+numpy
+pytest
