@@ -1,4 +1,5 @@
 data
+detector
 equation_scribe
 notebooks
 src
