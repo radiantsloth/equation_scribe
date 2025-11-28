@@ -77,26 +77,28 @@ def _latex_render(expr: str, out_path: str, dpi: int = 300, packages=None):
 
     packages = packages or ["amsmath", "amssymb", "amsfonts", "bm"]
 
-    # If expression looks like it contains a LaTeX environment or explicit display,
-    # make sure it is wrapped in display math so constructs like \begin{pmatrix}
-    # are compiled inside math mode.
-    needs_wrap = False
     s = expr.strip()
+
+    # Decide whether this needs display-math wrapping.
+    # If it contains a LaTeX environment (\begin{...}) or multiline content, use display math.
+    needs_display_math = False
     if "\\begin" in s or "\\cases" in s or "\\align" in s or "\n" in s:
-        needs_wrap = True
+        needs_display_math = True
 
-    # Detect if already inside an explicit math environment ($, \(, \[, \begin{equation}, etc)
+    # Detect if expression already explicitly uses math delimiters ($, \(, \[, or display environments).
     already_math = False
-    if s.startswith("$") or s.startswith("\\(") or s.startswith("\\[") or s.startswith("\\begin{"):
+    if s.startswith("$") or s.startswith("\\(") or s.startswith("\\["):
         already_math = True
+    # Note: do NOT treat "\begin{" as already math — we want to wrap that case.
 
-    if needs_wrap and not already_math:
-        # Use display math for environment expressions
+    # Construct the math block to place inside the standalone document.
+    if needs_display_math and not already_math:
         math_block = "\\[\n" + expr + "\n\\]"
-    elif not needs_wrap and not already_math:
+    elif not needs_display_math and not already_math:
         # Use inline math for short expressions
         math_block = "\\(" + expr + "\\)"
     else:
+        # Already has math delimiters or is intentionally a LaTeX fragment
         math_block = expr
 
     tex = r"""\documentclass[varwidth=true, border=2pt]{standalone}
@@ -130,6 +132,7 @@ def _latex_render(expr: str, out_path: str, dpi: int = 300, packages=None):
             raise RuntimeError("pdf2image did not return any pages")
         pages[0].convert("RGB").save(out_path)
     return out_path
+
 
 
 
