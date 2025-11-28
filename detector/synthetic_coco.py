@@ -3,7 +3,8 @@
 detector/synthetic_coco.py
 
 Generate synthetic pages with rendered LaTeX equations and produce COCO
-annotations (instances_all.json). Each pasted equation's bbox is exact.
+annotations (instances_all.json). For each generated page we also write a
+page-level .meta.json file containing the inserted equations (latex + bbox).
 
 Usage:
   python detector/synthetic_coco.py \
@@ -62,10 +63,9 @@ def make_synthetic_dataset(out_images_dir: Path, out_annotations: Path,
             tmp_png = out_images_dir / f"tmp_{pg}_{i}.png"
             prefer_latex = "\\begin" in expr or "\n" in expr or "\\\\[" in expr
             try:
-                # try render with preferred route
                 render_mathtext(expr, str(tmp_png), dpi=dpi, prefer_latex=prefer_latex)
             except Exception:
-                # fallback to matplotlib rendering if possible
+                # fallback to matplotlib rendering if pdflatex or pdf2image fails
                 try:
                     render_mathtext(expr, str(tmp_png), dpi=dpi, prefer_latex=False)
                 except Exception as e:
@@ -78,6 +78,7 @@ def make_synthetic_dataset(out_images_dir: Path, out_annotations: Path,
             x = random.randint(60, maxx)
             y = random.randint(60, maxy)
             bg.paste(eq_img, (x, y))
+
             x0, y0, x1, y1 = float(x), float(y), float(x + ew), float(y + eh)
             page_records.append({"latex": expr, "bbox": [x0, y0, x1, y1], "type": "display"})
             try:
@@ -85,7 +86,13 @@ def make_synthetic_dataset(out_images_dir: Path, out_annotations: Path,
             except Exception:
                 pass
 
+        # Save page and page-level metadata file
         bg.save(page_path)
+        meta = {"file_name": str(page_path), "width": page_w, "height": page_h, "eqs": page_records}
+        meta_path = page_path.with_suffix(".meta.json")
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # Append image record and annotations to COCO lists
         images.append({"id": image_id, "file_name": str(page_path), "width": page_w, "height": page_h})
         for rec in page_records:
             x0, y0, x1, y1 = rec["bbox"]
