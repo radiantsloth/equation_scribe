@@ -82,7 +82,8 @@ function Run-Python([string]$args) {
 
 # 1) Generate synthetic pages (small dataset)
 Write-Host "`n1) Generating synthetic data..." -ForegroundColor Green
-python equation_scribe\detector\synthetic_coco.py --out-images detector/data/images/synth --out-anns detector/data/annotations/instances_all.json --n-pages 20 --eqs-per-page 4 --dpi 150
+python equation_scribe\detector\synthetic_coco.py --out-images detector/data/images/synth --out-anns detector/data/annotations/instances_all.json --n-pages 50 --eqs-per-page 4 --dpi 150 --n-papers 10
+
 
 # 2) Split COCO by paper -> instances_train.json / instances_val.json
 Write-Host "`n2) Splitting COCO by paper..." -ForegroundColor Green
