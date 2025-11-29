@@ -1,5 +1,6 @@
 # equation_scribe/detector/detector.yaml
-path: detector/data
+# path: detector/data
+path: C:/Data/repos/equation_scribe/detector/data
 train: annotations/instances_tiles_train.json
 val: annotations/instances_tiles_val.json   # or instances_tiles_train.json for quick smoke
 nc: 2

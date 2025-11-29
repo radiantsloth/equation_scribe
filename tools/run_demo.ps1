@@ -97,6 +97,8 @@ python equation_scribe\detector\preprocess.py --input detector/data/images/synth
 Write-Host "`n4) Tiling (train set)..." -ForegroundColor Green
 python equation_scribe\detector\tiling.py --coco detector/data/annotations/instances_val.json --images-root detector/data/images/synth_pre --out-images detector/data/images/tiles_val --out-annotations detector/data/annotations/instances_tiles_val.json --tile-size 1024 --stride 512 --min-area-frac 0.25 --keep-empty-prob 0.05
 
+python equation_scribe/detector/tiling.py --coco detector/data/annotations/instances_train.json --images-root detector/data/images/synth_pre --out-images detector/data/images/tiles_train --out-annotations detector/data/annotations/instances_tiles_train.json --tile-size 1024 --stride 512 --min-area-frac 0.25 --keep-empty-prob 0.05
+
 # 5) Ensure detector/detector.yaml points to tiled dataset
 Write-Host "`n5) Verify detector/detector.yaml" -ForegroundColor Green
 Write-Host "If necessary, edit equation_scribe/detector/detector.yaml to point to the tiled images:" -ForegroundColor Yellow

@@ -12,3 +12,5 @@ detector/models/
 __pycache__/
 *.log
 *.bak
+args.yaml
+ultralytics_check_output.txt

@@ -120,7 +120,24 @@ def generate_tiles_from_coco(coco_in_path: Path, images_root: Path, out_images_d
             tile_img.save(out_tile_path)
             # image record
             w,h = tile_img.size
-            tile_images_info.append({"id": next_image_id, "file_name": str(out_tile_path), "width": w, "height": h})
+            # tile_images_info.append({"id": next_image_id, "file_name": str(out_tile_path), "width": w, "height": h})
+            # Prefer a path relative to the dataset root (two levels up from annotations),
+            # so detector.yaml path=detector/data and file_name='images/tiles_train/...' works.
+            try:
+                dataset_root = out_annotations_path.parent.parent  # e.g., detector/data
+                # if out_tile_path is under dataset_root, write relative path
+                rel_path = out_tile_path.relative_to(dataset_root)
+                file_name = rel_path.as_posix()   # use forward slashes for portability
+            except Exception:
+                # fallback to absolute path (also accepted by COCO loaders)
+                file_name = out_tile_path.resolve().as_posix()
+
+            tile_images_info.append({
+                "id": next_image_id,
+                "file_name": file_name,
+                "width": w,
+                "height": h
+            })
             # annotations for this tile
             for ann in t["annos"]:
                 bbox = ann["bbox"]
