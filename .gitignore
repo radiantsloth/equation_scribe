@@ -11,3 +11,4 @@ detector/models/
 
 __pycache__/
 *.log
+*.bak

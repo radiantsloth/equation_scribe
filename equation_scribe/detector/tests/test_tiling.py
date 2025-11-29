@@ -2,7 +2,7 @@ import tempfile
 from pathlib import Path
 from PIL import Image, ImageDraw
 import json
-from detector.tiling import generate_tiles_from_coco
+from equation_scribe.detector.tiling import generate_tiles_from_coco
 
 def make_sample_image(img_path):
     img = Image.new("RGB", (800, 1200), "white")

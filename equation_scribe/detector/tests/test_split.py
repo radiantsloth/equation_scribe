@@ -1,7 +1,7 @@
 import json
 import tempfile
 from pathlib import Path
-from detector.split_coco_by_paper import split_coco_by_paper
+from equation_scribe.detector.split_coco_by_paper import split_coco_by_paper
 
 def make_sample_coco(tmpdir):
     tmpdir = Path(tmpdir)

@@ -19,7 +19,7 @@ import random
 from PIL import Image
 
 # import render_mathtext from render_latex (must be in detector/)
-from detector.render_latex import render_mathtext
+from equation_scribe.detector.render_latex import render_mathtext
 
 def bbox_to_coco(x0, y0, x1, y1):
     w = max(0.0, x1 - x0)

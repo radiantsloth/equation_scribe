@@ -1,6 +1,6 @@
-# dataset descriptor for ultralytics (YOLOv8)
+# equation_scribe/detector/detector.yaml
 path: detector/data
-train: images/train
-val: images/val
+train: annotations/instances_tiles_train.json
+val: annotations/instances_tiles_val.json   # or instances_tiles_train.json for quick smoke
 nc: 2
 names: ['display','inline']
