@@ -1,7 +1,8 @@
 # equation_scribe/detector/detector.yaml
 # path: detector/data
 path: C:/Data/repos/equation_scribe/detector/data
-train: annotations/instances_tiles_train.json
-val: annotations/instances_tiles_val.json   # or instances_tiles_train.json for quick smoke
+train: images/tiles_train
+val: images/tiles_val
 nc: 2
-names: ['display','inline']
+names: ['equation', 'inline']   # or ['display','inline'] based on your categories
+

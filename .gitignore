@@ -2,6 +2,7 @@
 # data and models
 detector/data/
 detector/models/
+runs/
 *.pt
 *.pth
 *.onnx

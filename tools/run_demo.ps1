@@ -99,6 +99,13 @@ python equation_scribe\detector\tiling.py --coco detector/data/annotations/insta
 
 python equation_scribe/detector/tiling.py --coco detector/data/annotations/instances_train.json --images-root detector/data/images/synth_pre --out-images detector/data/images/tiles_train --out-annotations detector/data/annotations/instances_tiles_train.json --tile-size 1024 --stride 512 --min-area-frac 0.25 --keep-empty-prob 0.05
 
+# Create labels for train
+python tools/convert_coco_to_yolo.py --coco detector/data/annotations/instances_tiles_train.json --dataset-root detector/data --out-labels detector/data/labels
+
+# Create labels for val
+python tools/convert_coco_to_yolo.py --coco detector/data/annotations/instances_tiles_val.json --dataset-root detector/data --out-labels detector/data/labels
+
+
 # 5) Ensure detector/detector.yaml points to tiled dataset
 Write-Host "`n5) Verify detector/detector.yaml" -ForegroundColor Green
 Write-Host "If necessary, edit equation_scribe/detector/detector.yaml to point to the tiled images:" -ForegroundColor Yellow
@@ -117,24 +124,23 @@ try {
     Write-Warning "Skipping YOLO training step."
 }
 
-# # 7) Inference on a sample page using trained weights (if produced)
-# Write-Host "`n7) Inference on a sample page (if training produced weights)..." -ForegroundColor Green
-# $bestWeights = "runs\detect\eq_detector_quick\weights\best.pt"
-# if (Test-Path $bestWeights) {
-#     python equation_scribe\detector\inference.py --model $bestWeights --image detector/data/images/synth_pre/page_0000.png --conf 0.25
-# } else {
-#     Write-Warning "Best weights not found at $bestWeights — skipping inference."
-# }
+# 7) Inference on a sample page using trained weights (if produced)
+Write-Host "`n7) Inference on a sample page (if training produced weights)..." -ForegroundColor Green
+$bestWeights = "runs\detect\eq_detector_quick\weights\best.pt"
+if (Test-Path $bestWeights) {    
+    python equation_scribe\detector\inference.py --model $bestWeights --image detector/data/images/synth_pre/page_0000.png --conf 0.25
+} else {
+    Write-Warning "Best weights not found at $bestWeights -- skipping inference."
+}
 
-# # 8) Make recognition pairs (crop images + gold LaTeX) using .meta.json produced by synthetic generator
-# Write-Host "`n8) Create recognition pairs (crops -> latex)..." -ForegroundColor Green
-# python equation_scribe\detector\make_pairs.py --coco detector/data/annotations/instances_all.json --out-images detector/data/recognition/images --out-jsonl detector/data/recognition/pairs.jsonl --page-images-root detector/data/images/synth_pre
+# 8) Make recognition pairs (crop images + gold LaTeX) using .meta.json produced by synthetic generator
+Write-Host "n8) Create recognition pairs (crops -> latex)..." -ForegroundColor Green
+python equation_scribe\detector\make_pairs.py --coco detector/data/annotations/instances_all.json --out-images detector/data/recognition/images --out-jsonl detector/data/recognition/pairs.jsonl --page-images-root detector/data/images/synth_pre
 
-# Write-Host "`nDemo finished." -ForegroundColor Cyan
-# Write-Host "Inspect:" -ForegroundColor Cyan
-# Write-Host "  detector/data/images/synth_pre    (preprocessed pages)"
-# Write-Host "  detector/data/images/tiles_train (tiles)"
-# Write-Host "  detector/data/annotations/*      (COCO files)"
-# Write-Host "  runs/detect/eq_detector_quick    (YOLO run logs/weights if training ran)"
-# Write-Host "  detector/data/recognition/       (recognition crops and pairs.jsonl)" -ForegroundColor Cyan
-
+Write-Host "nDemo finished." -ForegroundColor Cyan
+Write-Host "Inspect:" -ForegroundColor Cyan
+Write-Host "  detector/data/images/synth_pre    (preprocessed pages)"
+Write-Host "  detector/data/images/tiles_train (tiles)"
+Write-Host "  detector/data/annotations/*      (COCO files)"
+Write-Host "  runs/detect/eq_detector_quick    (YOLO run logs/weights if training ran)"
+Write-Host "  detector/data/recognition/       (recognition crops and pairs.jsonl)" -ForegroundColor Cyan
