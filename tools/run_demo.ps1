@@ -91,7 +91,7 @@ python equation_scribe\detector\split_coco_by_paper.py --coco detector/data/anno
 
 # 3) Preprocess (optional; good for scan-like images)
 Write-Host "`n3) Preprocessing pages (denoise, deskew, CLAHE, binarize)..." -ForegroundColor Green
-python equation_scribe\detector\preprocess.py --input detector/data/images/synth --output detector/data/images/synth_pre --denoise --deskew --clahe --binarize
+python equation_scribe\detector\preprocess.py --input detector/data/images/synth --output detector/data/images/synth_pre --denoise  --clahe --binarize
 
 # 4) Tile the train set (creates tiles and tile-level COCO)
 Write-Host "`n4) Tiling (train set)..." -ForegroundColor Green

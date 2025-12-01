@@ -95,45 +95,112 @@ PAGE_HEIGHT_IN = 11.0 # inches
 DEFAULT_DPI = 150
 
 
-def place_boxes_non_overlapping(page_w: int, page_h: int, 
-                                 box_sizes: List[Tuple[int,int]],
-                                 margin: int = 20,
-                                 max_attempts: int = 200) -> List[Tuple[int,int]]:
+# def place_boxes_non_overlapping(page_w: int, page_h: int, 
+    #                              box_sizes: List[Tuple[int,int]],
+    #                              margin: int = 20,
+    #                              max_attempts: int = 200) -> List[Tuple[int,int]]:
+    # """
+    # Given a page size and a list of box widths/heights, attempt to place each
+    # box onto the page without overlapping previously placed boxes.
+
+    # Returns a list of (x, y) top-left coordinates for each box in box_sizes order.
+
+    # This is a greedy randomized algorithm that attempts up to max_attempts per box.
+    # """
+    # placed = []
+    # rects = []  # list of (x0, y0, x1, y1)
+
+    # for (w, h) in box_sizes:
+    #     placed_xy = None
+    #     for attempt in range(max_attempts):
+    #         x = random.randint(margin, max(0, page_w - w - margin))
+    #         y = random.randint(margin, max(0, page_h - h - margin))
+    #         x1, y1 = x + w, y + h
+    #         overlap = False
+    #         for (ax0, ay0, ax1, ay1) in rects:
+    #             # check overlap
+    #             if not (x1 <= ax0 or x >= ax1 or y1 <= ay0 or y >= ay1):
+    #                 overlap = True
+    #                 break
+    #         if not overlap:
+    #             placed_xy = (x, y)
+    #             rects.append((x, y, x1, y1))
+    #             break
+    #     if placed_xy is None:
+    #         # give up and place at random possibly overlapping position
+    #         x = max(margin, min(page_w - w - margin, random.randint(margin, page_w - w - margin)))
+    #         y = max(margin, min(page_h - h - margin, random.randint(margin, page_h - h - margin)))
+    #         placed_xy = (x, y)
+    #         rects.append((x, y, x + w, y + h))
+    #     placed.append(placed_xy)
+    # return placed
+################################################################################
+# stricter placement: try to place boxes with no overlap, optionally fail early
+################################################################################
+def place_boxes_non_overlapping_strict(
+    page_w: int,
+    page_h: int,
+    box_sizes: List[Tuple[int,int]],
+    margin_frac: float = 0.05,
+    max_attempts_per_box: int = 1000,
+    allow_overlap: bool = False,
+) -> List[Tuple[int,int]]:
     """
-    Given a page size and a list of box widths/heights, attempt to place each
-    box onto the page without overlapping previously placed boxes.
+    Try to place boxes of given sizes (w,h) on a page without overlap. If allow_overlap=False
+    the function will *raise* RuntimeError if it cannot place all boxes after the attempts.
+    Returns a list of top-left (x,y) placements in the same order as `box_sizes`.
 
-    Returns a list of (x, y) top-left coordinates for each box in box_sizes order.
-
-    This is a greedy randomized algorithm that attempts up to max_attempts per box.
+    Args:
+      page_w,page_h: page size in pixels
+      box_sizes: list of (w,h) for each box to place
+      margin_frac: fraction of page width to use as margin (larger margin -> fewer overlaps)
+      max_attempts_per_box: attempts per box before failing
+      allow_overlap: if True, fall back to placing even if overlaps must occur (backwards compatibility)
     """
-    placed = []
-    rects = []  # list of (x0, y0, x1, y1)
+    margin = max(1, int(margin_frac * min(page_w, page_h)))  # margin in px
+    rects: List[Tuple[int,int,int,int]] = []  # existing placed rectangles (x0,y0,x1,y1)
+    placements: List[Tuple[int,int]] = []
 
-    for (w, h) in box_sizes:
+    # helper to detect overlap
+    def overlaps_any(x0: int, y0: int, x1: int, y1: int) -> bool:
+        for ax0,ay0,ax1,ay1 in rects:
+            if not (x1 <= ax0 or x0 >= ax1 or y1 <= ay0 or y0 >= ay1):
+                return True
+        return False
+
+    for idx,(w,h) in enumerate(box_sizes):
         placed_xy = None
-        for attempt in range(max_attempts):
-            x = random.randint(margin, max(0, page_w - w - margin))
-            y = random.randint(margin, max(0, page_h - h - margin))
-            x1, y1 = x + w, y + h
-            overlap = False
-            for (ax0, ay0, ax1, ay1) in rects:
-                # check overlap
-                if not (x1 <= ax0 or x >= ax1 or y1 <= ay0 or y >= ay1):
-                    overlap = True
-                    break
-            if not overlap:
-                placed_xy = (x, y)
+        # clamp w,h to page
+        w = min(w, page_w - 2*margin)
+        h = min(h, page_h - 2*margin)
+        if w <= 0 or h <= 0:
+            raise RuntimeError(f"Box {idx} is too large for page: w={w} h={h} page=({page_w},{page_h})")
+        for attempt in range(max_attempts_per_box):
+            x = random.randint(margin, max(margin, page_w - w - margin))
+            y = random.randint(margin, max(margin, page_h - h - margin))
+            x1 = x + w
+            y1 = y + h
+            if not overlaps_any(x, y, x1, y1):
+                placed_xy = (x,y)
                 rects.append((x, y, x1, y1))
+                placements.append(placed_xy)
                 break
         if placed_xy is None:
-            # give up and place at random possibly overlapping position
-            x = max(margin, min(page_w - w - margin, random.randint(margin, page_w - w - margin)))
-            y = max(margin, min(page_h - h - margin, random.randint(margin, page_h - h - margin)))
-            placed_xy = (x, y)
-            rects.append((x, y, x + w, y + h))
-        placed.append(placed_xy)
-    return placed
+            # Could not place without overlap
+            if allow_overlap:
+                # place at a random location even if overlapping
+                x = random.randint(margin, max(margin, page_w - w - margin))
+                y = random.randint(margin, max(margin, page_h - h - margin))
+                rects.append((x, y, x + w, y + h))
+                placements.append((x,y))
+            else:
+                # fail early with useful diagnostic information
+                raise RuntimeError(
+                    f"Failed to place box {idx} without overlap after {max_attempts_per_box} attempts. "
+                    f"Page size=({page_w},{page_h}), box_size=({w},{h}), margin={margin}."
+                )
+    return placements
+
 
 
 def make_blank_page(width_px: int, height_px: int, color=(255,255,255)) -> Image.Image:
@@ -146,13 +213,144 @@ def ensure_dirs(*paths: Path):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.mkdir(parents=True, exist_ok=True) if p.suffix == "" else p.parent.mkdir(parents=True, exist_ok=True)
 
+################################################################################
+# helper: compute axis-aligned IoU for two boxes given as (x0,y0,x1,y1)
+################################################################################
+def compute_iou_xyxy(boxA: Tuple[float,float,float,float], boxB: Tuple[float,float,float,float]) -> float:
+    """
+    Compute axis-aligned IoU for two boxes in (x0,y0,x1,y1) format.
+    Returns IoU in [0,1].
+    """
+    ax0, ay0, ax1, ay1 = boxA
+    bx0, by0, bx1, by1 = boxB
+    ix0 = max(ax0, bx0)
+    iy0 = max(ay0, by0)
+    ix1 = min(ax1, bx1)
+    iy1 = min(ay1, by1)
+    iw = max(0.0, ix1 - ix0)
+    ih = max(0.0, iy1 - iy0)
+    inter = iw * ih
+    areaA = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+    areaB = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+    union = areaA + areaB - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+################################################################################
+# helper: compute tight axis-aligned bounding box of non-background pixels
+################################################################################
+def get_tight_bbox(img: Image.Image, bg_thresh: int = 250) -> Optional[Tuple[int,int,int,int]]:
+    """
+    Return a tight axis-aligned bounding box of non-background pixels for `img`.
+    Works for RGBA images (uses alpha) or RGB by thresholding brightness.
+    Returns (x0,y0,x1,y1) in img coordinates, or None if image is all background.
+    """
+    # Ensure RGBA
+    if img.mode == "RGBA":
+        alpha = img.split()[3]
+        bbox = alpha.getbbox()  # (left, upper, right, lower) or None
+        if bbox:
+            return bbox
+        # fall through to intensity check if alpha returned None
+    # For RGB / L images: do a brightness threshold to detect non-white
+    gray = img.convert("L")
+    # threshold: any pixel darker than bg_thresh is considered foreground
+    mask = gray.point(lambda p: 255 if p < bg_thresh else 0, mode="L")
+    bbox = mask.getbbox()
+    return bbox  # may be None
+
+
+################################################################################
+# IoU sanity check for page-level annotations
+################################################################################
+def assert_no_overlap_page_annotations(page_ann_boxes: List[Tuple[float,float,float,float]], eps: float = 1e-9):
+    """
+    Given a list of page annotation bboxes (x0,y0,x1,y1), assert that none overlap.
+    If any pair has IoU > eps, raises RuntimeError listing the offending pairs.
+    """
+    n = len(page_ann_boxes)
+    bad_pairs = []
+    for i in range(n):
+        for j in range(i+1, n):
+            iou = compute_iou_xyxy(page_ann_boxes[i], page_ann_boxes[j])
+            if iou > eps:
+                bad_pairs.append((i,j,iou))
+    if bad_pairs:
+        msg_lines = [f"Found {len(bad_pairs)} overlapping annotation pairs on a page:"]
+        for i,j,iou in bad_pairs[:10]:
+            msg_lines.append(f"  pair ({i},{j}) IoU={iou:.6f}")
+        if len(bad_pairs) > 10:
+            msg_lines.append(f"  ... and {len(bad_pairs)-10} more")
+        raise RuntimeError("\n".join(msg_lines))
+
+def place_and_annotate_on_page(
+    page_img: Image.Image,
+    eq_images: List[Tuple[str, Image.Image]],
+    page_annotations: list,
+    require_non_overlap: bool = True,
+    margin_frac: float = 0.05,
+    max_attempts_per_box: int = 1000,
+    rotate: bool = False,
+):
+    """
+    Places eq_images (list of (latex_str, PIL.Image)) on page_img non-overlapping,
+    crops tight bbox after any rotation, pastes the cropped image, and appends
+    page_annotations entries with bbox in page coords [x0,y0,x1,y1].
+
+    Raises RuntimeError if cannot place without overlap (when require_non_overlap=True).
+    """
+    PAGE_W, PAGE_H = page_img.size
+
+    # compute tight sizes for each eq image
+    box_sizes = []
+    processed = []
+    for expr, img in eq_images:
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
+        # If you want rotations, rotate here, e.g.:
+        if rotate:
+            angle = random.uniform(-10, 10)
+            img = img.rotate(angle, expand=True)
+
+        tight = get_tight_bbox(img, bg_thresh=250)
+        if tight is None:
+            tw, th = img.size
+            tight = (0, 0, tw, th)
+        tx0, ty0, tx1, ty1 = tight
+        tw = max(1, int(round(tx1 - tx0)))
+        th = max(1, int(round(ty1 - ty0)))
+        box_sizes.append((tw, th))
+        processed.append((expr, img, tight))
+
+    # strict placement
+    placements = place_boxes_non_overlapping_strict(
+        PAGE_W, PAGE_H, box_sizes,
+        margin_frac=margin_frac, max_attempts_per_box=max_attempts_per_box, allow_overlap=False
+    )
+
+    # paste and create annotations
+    page_boxes = []
+    for (expr, img, tight), (x, y) in zip(processed, placements):
+        tx0, ty0, tx1, ty1 = tight
+        cropped = img.crop((tx0, ty0, tx1, ty1)).convert("RGB")
+        page_img.paste(cropped, (x, y))
+        px0 = float(x); py0 = float(y)
+        px1 = float(x + (tx1 - tx0)); py1 = float(y + (ty1 - ty0))
+        page_boxes.append((px0, py0, px1, py1))
+        page_annotations.append({"latex": expr, "bbox": [px0, py0, px1, py1], "type": "display"})
+
+    if require_non_overlap:
+        assert_no_overlap_page_annotations(page_boxes, eps=1e-9)
+
+    return page_annotations
 
 def generate_synthetic_coco(out_images: Path, out_anns: Path,
                             n_pages: int = 50,
                             n_papers: int = 5,
                             eqs_per_page: int = 4,
                             dpi: int = DEFAULT_DPI,
-                            seed: int = 0):
+                            seed: int = 0,):
     """
     Generate synthetic pages and a COCO-style annotations JSON file containing
     the synthetic equation boxes.
@@ -234,33 +432,62 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
                 eq_images.append((expr, eq_img))
                 eq_sizes.append(eq_img.size)
 
-            # Place boxes non-overlapping
-            placements = place_boxes_non_overlapping(PAGE_W, PAGE_H, eq_sizes, margin=int(0.05*PAGE_W))
+            # # Place boxes non-overlapping
+            # placements = place_boxes_non_overlapping(PAGE_W, PAGE_H, eq_sizes, margin=int(0.05*PAGE_W))
 
-            # Paste the equation images and create COCO annotations
-            for (expr, eq_img), (x, y) in zip(eq_images, placements):
-                # If eq_img has alpha channel, composite it against white
-                if eq_img.mode == "RGBA":
-                    bg = Image.new("RGB", eq_img.size, (255,255,255))
-                    bg.paste(eq_img, mask=eq_img.split()[3])
-                    paste_img = bg
-                else:
-                    paste_img = eq_img.convert("RGB")
+            # # Paste the equation images and create COCO annotations
+            # for (expr, eq_img), (x, y) in zip(eq_images, placements):
+            #     # If eq_img has alpha channel, composite it against white
+            #     if eq_img.mode == "RGBA":
+            #         bg = Image.new("RGB", eq_img.size, (255,255,255))
+            #         bg.paste(eq_img, mask=eq_img.split()[3])
+            #         paste_img = bg
+            #     else:
+            #         paste_img = eq_img.convert("RGB")
 
-                page_img.paste(paste_img, (x, y))
+            #     page_img.paste(paste_img, (x, y))
 
-                w, h = paste_img.size
+            #     w, h = paste_img.size
+            #     coco["annotations"].append({
+            #         "id": ann_id,
+            #         "image_id": img_id,
+            #         "category_id": 1,
+            #         "bbox": [int(x), int(y), int(w), int(h)],
+            #         "area": int(w * h),
+            #         "iscrowd": 0,
+            #         # optional extras for downstream convenience
+            #         "paper_id": f"paper{paper_idx:03d}",
+            #         "page_index": page_idx,
+            #         "latex": expr,
+            #     })
+            #     ann_id += 1
+            # Strict placement and annotation (handles rotated tight bboxes and IoU checks)
+            page_records = []  # will accumulate page-level annotations (latex + bbox)
+            # call our helper to place, paste, and populate page_records
+            place_and_annotate_on_page(
+                page_img=page_img,
+                eq_images=eq_images,
+                page_annotations=page_records,
+                require_non_overlap=True,
+                margin_frac=0.05,
+                max_attempts_per_box=1000,
+            )
+
+            # Append page_records into COCO annotations (maintain ann_id)
+            for rec in page_records:
+                x0, y0, x1, y1 = rec["bbox"]
+                w = int(round(x1 - x0))
+                h = int(round(y1 - y0))
                 coco["annotations"].append({
                     "id": ann_id,
                     "image_id": img_id,
                     "category_id": 1,
-                    "bbox": [int(x), int(y), int(w), int(h)],
+                    "bbox": [int(round(x0)), int(round(y0)), w, h],
                     "area": int(w * h),
                     "iscrowd": 0,
-                    # optional extras for downstream convenience
                     "paper_id": f"paper{paper_idx:03d}",
                     "page_index": page_idx,
-                    "latex": expr,
+                    "latex": rec["latex"],
                 })
                 ann_id += 1
 
@@ -296,144 +523,10 @@ def parse_args():
     p.add_argument("--eqs-per-page", type=int, default=4, help="Number of equations per page.")
     p.add_argument("--dpi", type=int, default=DEFAULT_DPI, help="DPI for rendered pages.")
     p.add_argument("--seed", type=int, default=0, help="Random seed.")
+    p.add_argument("--rotate", action="store_true", help="Enable rotation augmentation for equation renderings")
+
     return p.parse_args()
 
-################################################################################
-# helper: compute axis-aligned IoU for two boxes given as (x0,y0,x1,y1)
-################################################################################
-def compute_iou_xyxy(boxA: Tuple[float,float,float,float], boxB: Tuple[float,float,float,float]) -> float:
-    """
-    Compute axis-aligned IoU for two boxes in (x0,y0,x1,y1) format.
-    Returns IoU in [0,1].
-    """
-    ax0, ay0, ax1, ay1 = boxA
-    bx0, by0, bx1, by1 = boxB
-    ix0 = max(ax0, bx0)
-    iy0 = max(ay0, by0)
-    ix1 = min(ax1, bx1)
-    iy1 = min(ay1, by1)
-    iw = max(0.0, ix1 - ix0)
-    ih = max(0.0, iy1 - iy0)
-    inter = iw * ih
-    areaA = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
-    areaB = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
-    union = areaA + areaB - inter
-    if union <= 0:
-        return 0.0
-    return inter / union
-
-################################################################################
-# helper: compute tight axis-aligned bounding box of non-background pixels
-################################################################################
-def get_tight_bbox(img: Image.Image, bg_thresh: int = 250) -> Optional[Tuple[int,int,int,int]]:
-    """
-    Return a tight axis-aligned bounding box of non-background pixels for `img`.
-    Works for RGBA images (uses alpha) or RGB by thresholding brightness.
-    Returns (x0,y0,x1,y1) in img coordinates, or None if image is all background.
-    """
-    # Ensure RGBA
-    if img.mode == "RGBA":
-        alpha = img.split()[3]
-        bbox = alpha.getbbox()  # (left, upper, right, lower) or None
-        if bbox:
-            return bbox
-        # fall through to intensity check if alpha returned None
-    # For RGB / L images: do a brightness threshold to detect non-white
-    gray = img.convert("L")
-    # threshold: any pixel darker than bg_thresh is considered foreground
-    mask = gray.point(lambda p: 255 if p < bg_thresh else 0, mode="L")
-    bbox = mask.getbbox()
-    return bbox  # may be None
-
-################################################################################
-# stricter placement: try to place boxes with no overlap, optionally fail early
-################################################################################
-def place_boxes_non_overlapping_strict(
-    page_w: int,
-    page_h: int,
-    box_sizes: List[Tuple[int,int]],
-    margin_frac: float = 0.05,
-    max_attempts_per_box: int = 1000,
-    allow_overlap: bool = False,
-) -> List[Tuple[int,int]]:
-    """
-    Try to place boxes of given sizes (w,h) on a page without overlap. If allow_overlap=False
-    the function will *raise* RuntimeError if it cannot place all boxes after the attempts.
-    Returns a list of top-left (x,y) placements in the same order as `box_sizes`.
-
-    Args:
-      page_w,page_h: page size in pixels
-      box_sizes: list of (w,h) for each box to place
-      margin_frac: fraction of page width to use as margin (larger margin -> fewer overlaps)
-      max_attempts_per_box: attempts per box before failing
-      allow_overlap: if True, fall back to placing even if overlaps must occur (backwards compatibility)
-    """
-    margin = max(1, int(margin_frac * min(page_w, page_h)))  # margin in px
-    rects: List[Tuple[int,int,int,int]] = []  # existing placed rectangles (x0,y0,x1,y1)
-    placements: List[Tuple[int,int]] = []
-
-    # helper to detect overlap
-    def overlaps_any(x0: int, y0: int, x1: int, y1: int) -> bool:
-        for ax0,ay0,ax1,ay1 in rects:
-            if not (x1 <= ax0 or x0 >= ax1 or y1 <= ay0 or y0 >= ay1):
-                return True
-        return False
-
-    for idx,(w,h) in enumerate(box_sizes):
-        placed_xy = None
-        # clamp w,h to page
-        w = min(w, page_w - 2*margin)
-        h = min(h, page_h - 2*margin)
-        if w <= 0 or h <= 0:
-            raise RuntimeError(f"Box {idx} is too large for page: w={w} h={h} page=({page_w},{page_h})")
-        for attempt in range(max_attempts_per_box):
-            x = random.randint(margin, max(margin, page_w - w - margin))
-            y = random.randint(margin, max(margin, page_h - h - margin))
-            x1 = x + w
-            y1 = y + h
-            if not overlaps_any(x, y, x1, y1):
-                placed_xy = (x,y)
-                rects.append((x, y, x1, y1))
-                placements.append(placed_xy)
-                break
-        if placed_xy is None:
-            # Could not place without overlap
-            if allow_overlap:
-                # place at a random location even if overlapping
-                x = random.randint(margin, max(margin, page_w - w - margin))
-                y = random.randint(margin, max(margin, page_h - h - margin))
-                rects.append((x, y, x + w, y + h))
-                placements.append((x,y))
-            else:
-                # fail early with useful diagnostic information
-                raise RuntimeError(
-                    f"Failed to place box {idx} without overlap after {max_attempts_per_box} attempts. "
-                    f"Page size=({page_w},{page_h}), box_size=({w},{h}), margin={margin}."
-                )
-    return placements
-
-################################################################################
-# IoU sanity check for page-level annotations
-################################################################################
-def assert_no_overlap_page_annotations(page_ann_boxes: List[Tuple[float,float,float,float]], eps: float = 1e-9):
-    """
-    Given a list of page annotation bboxes (x0,y0,x1,y1), assert that none overlap.
-    If any pair has IoU > eps, raises RuntimeError listing the offending pairs.
-    """
-    n = len(page_ann_boxes)
-    bad_pairs = []
-    for i in range(n):
-        for j in range(i+1, n):
-            iou = compute_iou_xyxy(page_ann_boxes[i], page_ann_boxes[j])
-            if iou > eps:
-                bad_pairs.append((i,j,iou))
-    if bad_pairs:
-        msg_lines = [f"Found {len(bad_pairs)} overlapping annotation pairs on a page:"]
-        for i,j,iou in bad_pairs[:10]:
-            msg_lines.append(f"  pair ({i},{j}) IoU={iou:.6f}")
-        if len(bad_pairs) > 10:
-            msg_lines.append(f"  ... and {len(bad_pairs)-10} more")
-        raise RuntimeError("\n".join(msg_lines))
 
 if __name__ == "__main__":
     args = parse_args()
