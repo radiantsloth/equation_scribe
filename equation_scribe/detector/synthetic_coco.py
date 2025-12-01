@@ -298,6 +298,142 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0, help="Random seed.")
     return p.parse_args()
 
+################################################################################
+# helper: compute axis-aligned IoU for two boxes given as (x0,y0,x1,y1)
+################################################################################
+def compute_iou_xyxy(boxA: Tuple[float,float,float,float], boxB: Tuple[float,float,float,float]) -> float:
+    """
+    Compute axis-aligned IoU for two boxes in (x0,y0,x1,y1) format.
+    Returns IoU in [0,1].
+    """
+    ax0, ay0, ax1, ay1 = boxA
+    bx0, by0, bx1, by1 = boxB
+    ix0 = max(ax0, bx0)
+    iy0 = max(ay0, by0)
+    ix1 = min(ax1, bx1)
+    iy1 = min(ay1, by1)
+    iw = max(0.0, ix1 - ix0)
+    ih = max(0.0, iy1 - iy0)
+    inter = iw * ih
+    areaA = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+    areaB = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+    union = areaA + areaB - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+################################################################################
+# helper: compute tight axis-aligned bounding box of non-background pixels
+################################################################################
+def get_tight_bbox(img: Image.Image, bg_thresh: int = 250) -> Optional[Tuple[int,int,int,int]]:
+    """
+    Return a tight axis-aligned bounding box of non-background pixels for `img`.
+    Works for RGBA images (uses alpha) or RGB by thresholding brightness.
+    Returns (x0,y0,x1,y1) in img coordinates, or None if image is all background.
+    """
+    # Ensure RGBA
+    if img.mode == "RGBA":
+        alpha = img.split()[3]
+        bbox = alpha.getbbox()  # (left, upper, right, lower) or None
+        if bbox:
+            return bbox
+        # fall through to intensity check if alpha returned None
+    # For RGB / L images: do a brightness threshold to detect non-white
+    gray = img.convert("L")
+    # threshold: any pixel darker than bg_thresh is considered foreground
+    mask = gray.point(lambda p: 255 if p < bg_thresh else 0, mode="L")
+    bbox = mask.getbbox()
+    return bbox  # may be None
+
+################################################################################
+# stricter placement: try to place boxes with no overlap, optionally fail early
+################################################################################
+def place_boxes_non_overlapping_strict(
+    page_w: int,
+    page_h: int,
+    box_sizes: List[Tuple[int,int]],
+    margin_frac: float = 0.05,
+    max_attempts_per_box: int = 1000,
+    allow_overlap: bool = False,
+) -> List[Tuple[int,int]]:
+    """
+    Try to place boxes of given sizes (w,h) on a page without overlap. If allow_overlap=False
+    the function will *raise* RuntimeError if it cannot place all boxes after the attempts.
+    Returns a list of top-left (x,y) placements in the same order as `box_sizes`.
+
+    Args:
+      page_w,page_h: page size in pixels
+      box_sizes: list of (w,h) for each box to place
+      margin_frac: fraction of page width to use as margin (larger margin -> fewer overlaps)
+      max_attempts_per_box: attempts per box before failing
+      allow_overlap: if True, fall back to placing even if overlaps must occur (backwards compatibility)
+    """
+    margin = max(1, int(margin_frac * min(page_w, page_h)))  # margin in px
+    rects: List[Tuple[int,int,int,int]] = []  # existing placed rectangles (x0,y0,x1,y1)
+    placements: List[Tuple[int,int]] = []
+
+    # helper to detect overlap
+    def overlaps_any(x0: int, y0: int, x1: int, y1: int) -> bool:
+        for ax0,ay0,ax1,ay1 in rects:
+            if not (x1 <= ax0 or x0 >= ax1 or y1 <= ay0 or y0 >= ay1):
+                return True
+        return False
+
+    for idx,(w,h) in enumerate(box_sizes):
+        placed_xy = None
+        # clamp w,h to page
+        w = min(w, page_w - 2*margin)
+        h = min(h, page_h - 2*margin)
+        if w <= 0 or h <= 0:
+            raise RuntimeError(f"Box {idx} is too large for page: w={w} h={h} page=({page_w},{page_h})")
+        for attempt in range(max_attempts_per_box):
+            x = random.randint(margin, max(margin, page_w - w - margin))
+            y = random.randint(margin, max(margin, page_h - h - margin))
+            x1 = x + w
+            y1 = y + h
+            if not overlaps_any(x, y, x1, y1):
+                placed_xy = (x,y)
+                rects.append((x, y, x1, y1))
+                placements.append(placed_xy)
+                break
+        if placed_xy is None:
+            # Could not place without overlap
+            if allow_overlap:
+                # place at a random location even if overlapping
+                x = random.randint(margin, max(margin, page_w - w - margin))
+                y = random.randint(margin, max(margin, page_h - h - margin))
+                rects.append((x, y, x + w, y + h))
+                placements.append((x,y))
+            else:
+                # fail early with useful diagnostic information
+                raise RuntimeError(
+                    f"Failed to place box {idx} without overlap after {max_attempts_per_box} attempts. "
+                    f"Page size=({page_w},{page_h}), box_size=({w},{h}), margin={margin}."
+                )
+    return placements
+
+################################################################################
+# IoU sanity check for page-level annotations
+################################################################################
+def assert_no_overlap_page_annotations(page_ann_boxes: List[Tuple[float,float,float,float]], eps: float = 1e-9):
+    """
+    Given a list of page annotation bboxes (x0,y0,x1,y1), assert that none overlap.
+    If any pair has IoU > eps, raises RuntimeError listing the offending pairs.
+    """
+    n = len(page_ann_boxes)
+    bad_pairs = []
+    for i in range(n):
+        for j in range(i+1, n):
+            iou = compute_iou_xyxy(page_ann_boxes[i], page_ann_boxes[j])
+            if iou > eps:
+                bad_pairs.append((i,j,iou))
+    if bad_pairs:
+        msg_lines = [f"Found {len(bad_pairs)} overlapping annotation pairs on a page:"]
+        for i,j,iou in bad_pairs[:10]:
+            msg_lines.append(f"  pair ({i},{j}) IoU={iou:.6f}")
+        if len(bad_pairs) > 10:
+            msg_lines.append(f"  ... and {len(bad_pairs)-10} more")
+        raise RuntimeError("\n".join(msg_lines))
 
 if __name__ == "__main__":
     args = parse_args()
