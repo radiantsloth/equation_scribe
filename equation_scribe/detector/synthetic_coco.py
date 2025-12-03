@@ -19,7 +19,7 @@ Notes:
 * Images will be named like `paper000_page_0000.png`, etc.  This is required
   by split_coco_by_paper.py so it can detect which pages belong to the same
   paper.
-* The script attempts to use the local `detector.render_latex.render_mathtext`
+* The script attempts to use the local `equation_scribe.detector.render_latex.render_mathtext`
   renderer if available (that renderer uses LaTeX or matplotlib).  If that's
   unavailable, a matplotlib-based fallback renderer is used.
 """
@@ -32,7 +32,8 @@ import os
 import random
 import tempfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+import shutil
 
 from PIL import Image
 
@@ -41,13 +42,20 @@ from PIL import Image
 _render_mathtext = None
 try:
     # Attempt absolute import (detector is a package under equation_scribe)
-    from detector.render_latex import render_mathtext as _render_mathtext  # type: ignore
+    from equation_scribe.detector.render_latex import render_mathtext as _render_mathtext  # type: ignore
 except Exception:
     try:
         # Try local import if run as a script from detector/ directory
         from .render_latex import render_mathtext as _render_mathtext  # type: ignore
     except Exception:
         _render_mathtext = None
+try:
+    # import the internal latex renderer and the pdf2image flag
+    from equation_scribe.detector.render_latex import _latex_render, HAVE_PDF2IMAGE  # type: ignore
+except Exception:
+    # Not fatal — the code will fall back to matplotlib if pdflatex or pdf2image aren't present
+    _latex_render = None
+    HAVE_PDF2IMAGE = False
 
 # If render_latex isn't present, we provide a simple matplotlib fallback
 if _render_mathtext is None:
@@ -403,21 +411,97 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
             eq_images = []
             eq_sizes = []
             for expr in eq_exprs:
+                                # render into a temporary PNG (tmpname)
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpf:
                     tmpname = tmpf.name
-                try:
-                    # Render using repository's renderer (or fallback)
-                    _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=True)
-                    eq_img = Image.open(tmpname).convert("RGBA")
-                except Exception:
-                    # Fallback: draw a small placeholder box with the expression text
-                    eq_img = Image.new("RGBA", (int(dpi*0.5), int(dpi*0.2)), (200, 200, 200, 255))
-                finally:
-                    # Try to clean up the temp file (Image sometimes keeps it open)
+
+                eq_img = None
+
+                # DEBUG: print LaTeX availability so logs make it clear
+                # (this will help in diagnosing intermittent environment/path differences)
+                if _latex_render is None or shutil.which("pdflatex") is None or not HAVE_PDF2IMAGE:
+                    print(f"[DEBUG] pdflatex available? {shutil.which('pdflatex') is not None}; pdf2image available? {HAVE_PDF2IMAGE}")
+
+                # If the expression looks like a LaTeX environment, force the LaTeX route
+                if "\\begin" in expr and _latex_render is not None and shutil.which("pdflatex") and HAVE_PDF2IMAGE:
                     try:
-                        os.unlink(tmpname)
-                    except Exception:
-                        pass
+                        # Call the real LaTeX renderer directly (bypass matplotlib entirely)
+                        _latex_render(expr, tmpname, dpi=max(dpi, 300))
+                        eq_img = Image.open(tmpname).convert("RGBA")
+                    except Exception as latex_exc:
+                        # If the real LaTeX render fails here, print detailed diagnostics
+                        print("----------------------------------------------------------------------")
+                        print("[ERROR] _latex_render failed for expression:", repr(expr))
+                        print("[ERROR] Exception:", latex_exc)
+                        # attempt matplotlib fallback (it will fail for \\begin{...}, but try anyway)
+                        try:
+                            _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=False)
+                            eq_img = Image.open(tmpname).convert("RGBA")
+                            print("[INFO] matplotlib fallback succeeded for expression:", repr(expr))
+                        except Exception as mpl_exc:
+                            print("[ERROR] matplotlib fallback also failed for expression:", repr(expr))
+                            print(" LaTeX exception:", latex_exc)
+                            print(" Matplotlib exception:", mpl_exc)
+                            # print any nearby .tex/.log files for quick debugging if present
+                            try:
+                                tmpdir = Path(tmpname).parent
+                                for tf in tmpdir.glob("*.log")[:3]:
+                                    print(f" --- contents of {tf.name} ---")
+                                    print(tf.read_text(errors="ignore")[:2000])
+                            except Exception:
+                                pass
+                            eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
+                else:
+                    # Non-environment expressions: use the regular renderer which will try LaTeX
+                    # when appropriate (and fall back to matplotlib).
+                    try:
+                        _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=True)
+                        eq_img = Image.open(tmpname).convert("RGBA")
+                    except Exception as e_first:
+                        # Try fallback (matplotlib)
+                        print("[WARN] render_mathtext(prefer_latex=True) failed; trying matplotlib fallback.", repr(expr))
+                        try:
+                            _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=False)
+                            eq_img = Image.open(tmpname).convert("RGBA")
+                            print("[INFO] matplotlib fallback succeeded for expression:", repr(expr))
+                        except Exception as e_second:
+                            print("[ERROR] Both LaTeX and matplotlib rendering failed for:", repr(expr))
+                            print(" First exception:", e_first)
+                            print(" Second exception:", e_second)
+                            eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
+                # finally: clean up temp file if present
+                try:
+                    if Path(tmpname).exists():
+                        Path(tmpname).unlink()
+                except Exception:
+                    pass
+
+                if eq_img is None:
+                    # Defensive fallback
+                    eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
+
+
+                # At this point eq_img should be a PIL.Image (RGBA)
+                if eq_img is None:
+                    # defensive: create a visible placeholder if something odd happened
+                    eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
+
+                # with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpf:
+                #     tmpname = tmpf.name
+                # try:
+                #     # Render using repository's renderer (or fallback)
+                #     _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=True)
+                #     # render_mathtext(expr, tmpname, dpi=dpi)
+                #     eq_img = Image.open(tmpname).convert("RGBA")
+                # except Exception:
+                #     # Fallback: draw a small placeholder box with the expression text
+                #     eq_img = Image.new("RGBA", (int(dpi*0.5), int(dpi*0.2)), (200, 200, 200, 255))
+                # finally:
+                #     # Try to clean up the temp file (Image sometimes keeps it open)
+                #     try:
+                #         os.unlink(tmpname)
+                #     except Exception:
+                #         pass
 
                 # Ensure a reasonable size - enforce max width/height relative to page
                 max_w = int(PAGE_W * 0.6)

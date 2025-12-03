@@ -11,10 +11,24 @@ def detect_image(model_path, image_path, conf_thresh=0.25, iou=0.5):
     r = results[0]
     boxes = []
     if hasattr(r, "boxes"):
+        # for box in r.boxes:
+        #     xyxy = box.xyxy[0].numpy().tolist()  # [x1,y1,x2,y2]
+        #     conf = float(box.conf[0])
+        #     clsid = int(box.cls[0])
+        #     boxes.append({"xyxy": xyxy, "conf": conf, "cls": clsid})
         for box in r.boxes:
-            xyxy = box.xyxy[0].numpy().tolist()  # [x1,y1,x2,y2]
-            conf = float(box.conf[0])
-            clsid = int(box.cls[0])
+            # move tensors to CPU before converting to numpy/list
+            xyxy = box.xyxy[0].cpu().numpy().tolist()  # [x1,y1,x2,y2]
+            # conf and cls may be single-element tensors; use .cpu().item() for scalars
+            try:
+                conf = float(box.conf[0].cpu().item())
+            except Exception:
+                # fallback if not a tensor or already CPU
+                conf = float(box.conf[0])
+            try:
+                clsid = int(box.cls[0].cpu().item())
+            except Exception:
+                clsid = int(box.cls[0])
             boxes.append({"xyxy": xyxy, "conf": conf, "cls": clsid})
     return boxes
 

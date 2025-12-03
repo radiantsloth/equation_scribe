@@ -1,72 +1,9 @@
+# powershell -ExecutionPolicy Bypass -File ".\tools\run_demo.ps1"
+
 # # tools/run_demo.ps1
 # # Usage: from repo root
 # #   .\tools\run_demo.ps1
 
-# $ErrorActionPreference = 'Stop'
-
-# # Activate environment first (do it in your shell)
-# Write-Host "Ensure eqscribe conda env is active."
-
-# # 1) Generate synthetic pages (small)
-# Write-Host "1) Generating synthetic data..."
-# python .\equation_scribe\equation_scribe\detector\synthetic_coco.py `
-#   --out-images equation_scribe/detector/data/images/synth `
-#   --out-anns equation_scribe/detector/data/annotations/instances_all.json `
-#   --n-pages 20 --eqs-per-page 4 --dpi 150
-
-# # 2) Split by paper -> train/val
-# Write-Host "2) Splitting COCO by paper..."
-# python .\equation_scribe\detector\split_coco_by_paper.py `
-#   --coco equation_scribe/detector/data/annotations/instances_all.json `
-#   --out-dir equation_scribe/detector/data/annotations --val-frac 0.2 --seed 0
-
-# # 3) Preprocess (optional, good for scanned style)
-# Write-Host "3) Preprocessing pages..."
-# python .\equation_scribe\equation_scribe\detector\preprocess.py `
-#   --input equation_scribe/detector/data/images/synth `
-#   --output equation_scribe/detector/data/images/synth_pre `
-#   --denoise --deskew --clahe --binarize
-
-# # 4) Tile the train set
-# Write-Host "4) Tiling (train set) - this can generate many images..."
-# python .\equation_scribe\detector\tiling.py `
-#   --coco equation_scribe/detector/data/annotations/instances_train.json `
-#   --images-root equation_scribe/detector/data/images/synth_pre `
-#   --out-images equation_scribe/detector/data/images/tiles_train `
-#   --out-annotations equation_scribe/detector/data/annotations/instances_tiles_train.json `
-#   --tile-size 1024 --stride 512 --min-area-frac 0.25 --keep-empty-prob 0.05
-
-# # 5) Prepare detector YAML (update if necessary)
-# Write-Host "5) Ensure equation_scribe/detector/detector.yaml points to tiled images. Example:"
-# Write-Host "   path: equation_scribe/detector/data"
-# Write-Host "   train: equation_scribe/images/tiles_train"
-# Write-Host "   val: equation_scribe/images/tiles_train   # for demo use train as val"
-
-# # 6) Quick YOLOv8 training (5 epochs) - adjust device if necessary
-# Write-Host "6) Quick YOLO train (5 epochs) - check GPU memory and adjust batch size"
-# bash -c "yolo task=detect mode=train model=yolov8s.pt data=equation_scribe/detector/detector.yaml epochs=5 imgsz=1024 batch=4 device=0 name=eq_detector_quick" 
-
-# # 7) Inference on a sample page
-# Write-Host "7) Inference on a sample page"
-# python .\equation_scribe\detector\inference.py `
-#   --model runs/detect/eq_detector_quick/weights/best.pt `
-#   --image detector/data/images/synth_pre/page_0000.png --conf 0.25
-
-# # 8) Create recognition pairs from full COCO (uses .meta.json)
-# Write-Host "8) Make recognition pairs (crops with gold latex)"
-# python .\equation_scribe\detector\make_pairs.py `
-#   --coco detector/data/annotations/instances_all.json `
-#   --out-images detector/data/recognition/images `
-#   --out-jsonl detector/data/recognition/pairs.jsonl `
-#   --page-images-root detector/data/images/synth_pre
-
-# Write-Host "Demo complete. Inspect detector/data/... and run further training as required."
-
-# tools/run_demo.ps1
-# PowerShell demo orchestration for Windows.
-# Run from repo root after activating the 'eqscribe' conda env:
-#   conda activate eqscribe
-#   .\tools\run_demo.ps1
 
 $ErrorActionPreference = 'Stop'
 
@@ -82,7 +19,7 @@ function Run-Python([string]$args) {
 
 # 1) Generate synthetic pages (small dataset)
 Write-Host "`n1) Generating synthetic data..." -ForegroundColor Green
-python equation_scribe\detector\synthetic_coco.py --out-images detector/data/images/synth --out-anns detector/data/annotations/instances_all.json --n-pages 50 --eqs-per-page 4 --dpi 150 --n-papers 10
+python equation_scribe\detector\synthetic_coco.py --out-images detector/data/images/synth --out-anns detector/data/annotations/instances_all.json --n-pages 50 --eqs-per-page 4 --dpi 150 --n-papers 200
 
 
 # 2) Split COCO by paper -> instances_train.json / instances_val.json
@@ -128,7 +65,7 @@ try {
 Write-Host "`n7) Inference on a sample page (if training produced weights)..." -ForegroundColor Green
 $bestWeights = "runs\detect\eq_detector_quick\weights\best.pt"
 if (Test-Path $bestWeights) {    
-    python equation_scribe\detector\inference.py --model $bestWeights --image detector/data/images/synth_pre/page_0000.png --conf 0.25
+    python equation_scribe\detector\inference.py --model $bestWeights --image detector/data/images/synth_pre/paper000_page_0000.png --conf 0.25
 } else {
     Write-Warning "Best weights not found at $bestWeights -- skipping inference."
 }
