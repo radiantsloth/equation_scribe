@@ -1,6 +1,8 @@
-# dataset descriptor for ultralytics (YOLOv8)
-path: detector/data
-train: images/train
-val: images/val
+# equation_scribe/detector/detector.yaml
+# path: detector/data
+path: C:/Data/repos/equation_scribe/detector/data
+train: images/tiles_train
+val: images/tiles_val
 nc: 2
-names: ['display','inline']
+names: ['equation', 'inline']   # or ['display','inline'] based on your categories
+

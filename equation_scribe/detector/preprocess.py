@@ -44,7 +44,7 @@ def deskew_image(gray: np.ndarray) -> np.ndarray:
 
 def preprocess_image(img_bgr: np.ndarray,
                      denoise: bool = True,
-                     deskew: bool = True,
+                     deskew: bool = False,
                      clahe: bool = True,
                      binarize: bool = True) -> np.ndarray:
     # ensure grayscale

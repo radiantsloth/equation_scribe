@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image
 from pathlib import Path
-from detector.preprocess import preprocess_image
+from equation_scribe.detector.preprocess import preprocess_image
 import tempfile
 
 def test_preprocess(tmp_path):
