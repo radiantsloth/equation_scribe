@@ -17,6 +17,12 @@ function Run-Python([string]$args) {
     if ($LASTEXITCODE -ne 0) { throw "Command failed: python $args" }
 }
 
+# # Clear previous synthetic data:
+# python tools/clear_dirs.py --clear-data --data-dir detector/data --annotations-file detector/data/annotations/instances_all.json --yes
+
+# # Clear previous runs:
+# python tools/clear_dirs.py --clear-runs --runs-dir runs/detect --prefix eq_detector --yes
+
 # 1) Generate synthetic pages (small dataset)
 Write-Host "`n1) Generating synthetic data..." -ForegroundColor Green
 python equation_scribe\detector\synthetic_coco.py --out-images detector/data/images/synth --out-anns detector/data/annotations/instances_all.json --n-pages 50 --eqs-per-page 4 --dpi 150 --n-papers 200
