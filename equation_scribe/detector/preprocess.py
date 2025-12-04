@@ -14,6 +14,9 @@ from typing import Tuple
 import argparse
 from tqdm import tqdm
 from PIL import Image
+import math
+
+from equation_scribe.config import DESKEW_THRESHOLD_DEG
 
 def load_image_cv(path: Path):
     im = Image.open(path).convert("RGB")
@@ -24,23 +27,64 @@ def save_image_cv(arr: np.ndarray, out_path: Path):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(arr).save(out_path)
 
-def deskew_image(gray: np.ndarray) -> np.ndarray:
-    # Use moments approach on edges; fallback to minAreaRect on text contours
-    blur = cv2.GaussianBlur(gray, (3,3), 0)
-    edges = cv2.Canny(blur, 50, 150)
-    coords = np.column_stack(np.where(edges > 0))
-    if coords.shape[0] < 10:
-        return gray
+def deskew_image(pil_img):
+    """
+    Deskew a PIL image using the standard cv2/minAreaRect approach.
+    If the detected angle is smaller than DESKEW_THRESHOLD_DEG, skip deskew.
+
+    Returns:
+        (img_out, angle_deg)
+    """
+    # Convert to grayscale numpy array (uint8)
+    img = np.array(pil_img.convert("L"))
+    # Binarize for edge detection
+    _, bw = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Invert because text is dark on light background; want foreground=white
+    bw_inv = 255 - bw
+
+    # Find coordinates of non-zero pixels
+    coords = np.column_stack(np.where(bw_inv > 0))
+    if coords.size == 0:
+        # nothing to deskew
+        return pil_img, 0.0
+
     rect = cv2.minAreaRect(coords)
+    # rect = ((cx, cy), (w, h), angle)
     angle = rect[-1]
-    if angle < -45:
-        angle = -(90 + angle)
+    # cv2.minAreaRect angle convention:
+    # - if width < height: angle = angle
+    # - if width >= height: angle = angle + 90
+    # Normalize to [-90, 90)
+    if rect[1][0] < rect[1][1]:
+        angle_deg = angle
     else:
-        angle = -angle
-    (h, w) = gray.shape[:2]
-    M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
-    rotated = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-    return rotated
+        angle_deg = angle + 90.0
+
+    # If angle is tiny, skip deskew entirely (avoids small numerical jitter)
+    if abs(angle_deg) < DESKEW_THRESHOLD_DEG:
+        return pil_img, 0.0
+
+    # Rotate the original PIL image by -angle_deg to deskew
+    rotated = pil_img.rotate(-angle_deg, resample=Image.BICUBIC, expand=True, fillcolor=(255,255,255))
+    return rotated, angle_deg
+
+# def deskew_image(gray: np.ndarray) -> np.ndarray:
+#     # Use moments approach on edges; fallback to minAreaRect on text contours
+#     blur = cv2.GaussianBlur(gray, (3,3), 0)
+#     edges = cv2.Canny(blur, 50, 150)
+#     coords = np.column_stack(np.where(edges > 0))
+#     if coords.shape[0] < 10:
+#         return gray
+#     rect = cv2.minAreaRect(coords)
+#     angle = rect[-1]
+#     if angle < -45:
+#         angle = -(90 + angle)
+#     else:
+#         angle = -angle
+#     (h, w) = gray.shape[:2]
+#     M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
+#     rotated = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+#     return rotated
 
 def preprocess_image(img_bgr: np.ndarray,
                      denoise: bool = True,
