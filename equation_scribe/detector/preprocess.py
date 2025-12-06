@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Preprocessing pipeline for scanned PDF pages:
-- grayscale, denoise, deskew, CLAHE, adaptive threshold / binarize
+preprocess.py — image preprocessing utilities for scanned pages.
 
-Usage:
-  python detector/preprocess.py --input detector/data/images/somepaper --output detector/data/images_preprocessed --deskew --clahe
+Functions include:
+  - deskew_image: estimate and correct page skew,
+  - apply_clahe: adaptive histogram equalization (optional),
+  - binarization helpers.
+
+This module may use OpenCV (cv2) and requires numpy and Pillow.
 """
 
 import cv2
@@ -29,12 +32,23 @@ def save_image_cv(arr: np.ndarray, out_path: Path):
 
 def deskew_image(pil_img):
     """
-    Deskew a PIL image using the standard cv2/minAreaRect approach.
-    If the detected angle is smaller than DESKEW_THRESHOLD_DEG, skip deskew.
+    Estimate the skew angle of a page and rotate the image to correct it.
 
+    The function uses a binary foreground mask (via Otsu thresholding) and
+    cv2.minAreaRect on foreground coordinates to estimate the oriented bounding
+    rectangle and its angle. The detected angle is normalized to degrees.
+
+    Args:
+        pil_img: PIL Image of the page (any mode).
     Returns:
-        (img_out, angle_deg)
+        (rotated_img, angle_deg): rotated image (PIL.Image) and angle in degrees
+                                 applied to deskew the image (positive means
+                                 image was rotated by -angle_deg to deskew).
+    Notes:
+        - If the absolute angle is smaller than DESKEW_THRESHOLD_DEG, the
+          function will return the original image and angle 0.0.
     """
+
     # Convert to grayscale numpy array (uint8)
     img = np.array(pil_img.convert("L"))
     # Binarize for edge detection
@@ -67,24 +81,6 @@ def deskew_image(pil_img):
     # Rotate the original PIL image by -angle_deg to deskew
     rotated = pil_img.rotate(-angle_deg, resample=Image.BICUBIC, expand=True, fillcolor=(255,255,255))
     return rotated, angle_deg
-
-# def deskew_image(gray: np.ndarray) -> np.ndarray:
-#     # Use moments approach on edges; fallback to minAreaRect on text contours
-#     blur = cv2.GaussianBlur(gray, (3,3), 0)
-#     edges = cv2.Canny(blur, 50, 150)
-#     coords = np.column_stack(np.where(edges > 0))
-#     if coords.shape[0] < 10:
-#         return gray
-#     rect = cv2.minAreaRect(coords)
-#     angle = rect[-1]
-#     if angle < -45:
-#         angle = -(90 + angle)
-#     else:
-#         angle = -angle
-#     (h, w) = gray.shape[:2]
-#     M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
-#     rotated = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-#     return rotated
 
 def preprocess_image(img_bgr: np.ndarray,
                      denoise: bool = True,
