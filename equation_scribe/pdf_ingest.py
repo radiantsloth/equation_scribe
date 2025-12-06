@@ -97,16 +97,23 @@ def page_image(doc: PdfDoc, i: int, dpi: Optional[int] = None) -> Image.Image:
 
 def pdf_to_px_transform(arg1, arg2=None, dpi: Optional[int] = None):
     """
-    Dual-mode helper.
+    Return two transformation functions for mapping between PDF point coordinates
+    (points where origin is bottom-left) and pixel coordinates (origin top-left)
+    for a given PDF page at the currently configured rasterization DPI.
 
-    Usage patterns:
-    1) pdf_to_px_transform(doc: PdfDoc, page_index: int, dpi: Optional[int]) -> (pdf_to_px, px_to_pdf)
-         - This is the original API: returns two callables for conversion.
+    Returns:
+        (pdf2px, px2pdf)
+    Where:
+        pdf2px(x_pdf, y_pdf) -> (x_px, y_px)  # maps PDF points to image pixels
+        px2pdf(x_px, y_px) -> (x_pdf, y_pdf)  # maps image pixels back to PDF points
 
-    2) pdf_to_px_transform(img_size: (width_px, height_px), bbox_pdf: (x0,y0,x1,y1)) -> (x0p,y0p,x1p,y1p)
-         - Convenience helper used by tests: map a PDF bbox (in points) to pixel coordinates
-           given an image size. This assumes a typical PDF page width of 612 pts and derives
-           page height from the image aspect ratio.
+    Example:
+        pdf2px = pdf_to_px_transform(doc, 0)[0]
+        x_px, y_px = pdf2px(72.0, 72.0)  # map 1-inch offset from bottom-left to pixels
+
+    Notes:
+        - If the page has rotation or is rendered at different DPI, the transforms
+          incorporate the scale and vertical flip required to go between coordinate systems.
     """
     # Mode 2: img_size + bbox -> pixel bbox
     if isinstance(arg1, (tuple, list)) and arg2 is not None:
@@ -245,11 +252,11 @@ def page_layout_ocr(doc: PdfDoc, i: int) -> List[Dict[str, Any]]:
         y1_pdf = float(max(y0_pt, y1_pt))
 
         spans.append({
-            "text": w.get("text", ""),
-            "bbox_pdf": bbox_pdf,
-            "bbox": bbox_pdf,             # compatibility for tests that expect "bbox"
+            "text": txt,
+            "bbox_pdf": (x0_pdf, y0_pdf, x1_pdf, y1_pdf),
+            "bbox": (x0_pdf, y0_pdf, x1_pdf, y1_pdf),
             "page_index": i,
-         })
+        })
 
     return spans
 

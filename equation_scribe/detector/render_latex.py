@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-render_latex.py
+render_latex.py — render LaTeX math to PNG.
 
-Render LaTeX math expressions to PNG images.
+Approach:
+  1. Prefer pdflatex + standalone package for complex LaTeX environments (matrix,
+     arrays, multi-line constructs). Use pdf2image/poppler to rasterize.
+  2. Fall back to matplotlib.mathtext rendering for simpler expressions.
 
-- For simple inline math, Matplotlib's mathtext is used (fast).
-- For expressions that use LaTeX environments like \begin{pmatrix}, the script
-  falls back to running pdflatex (real LaTeX engine) and converting the PDF
-  to PNG via pdf2image.
+Requirements:
+  - pdflatex (MiKTeX or TeX Live) for full LaTeX rendering
+  - poppler (pdftoppm) and pdf2image (optional) to convert PDF to PNG
+  - matplotlib for fallback rendering
 
-Dependencies:
-- matplotlib (for simple mathtext)
-- pdf2image (for LaTeX route) and poppler (system)
-- A LaTeX engine (pdflatex) for full LaTeX rendering (MikTeX or TeX Live)
+API:
+  - render_mathtext(expr, out_path, dpi=150, prefer_latex=True) -> None
 """
 
 import os
@@ -138,13 +139,16 @@ def _latex_render(expr: str, out_path: str, dpi: int = 300, packages=None):
 
 def render_mathtext(expr: str, out_path: str, dpi: int = 200, fontsize: int = 28, prefer_latex: bool = False):
     """
-    Render a LaTeX expression to out_path (PNG).
+    Render a TeX math expression to an image file at `out_path`.
 
-    - expr: LaTeX expression (e.g., '\\nabla \\cdot E = \\rho/\\varepsilon_0' or '\\begin{pmatrix} ...')
-    - out_path: target png path
-    - dpi: resolution for rendering
-    - fontsize: used for matplotlib route
-    - prefer_latex: if True, always try pdflatex route; otherwise autodetect
+    Args:
+        expr: LaTeX expression (may include environments such as \\begin{pmatrix} ... \\end{pmatrix}).
+        out_path: path to write the PNG result.
+        dpi: rasterization DPI.
+        prefer_latex: if True, try pdflatex first; otherwise use matplotlib fallback.
+
+    Raises:
+        RuntimeError: if both pdflatex and matplotlib rendering fail.
     """
     out_path = str(out_path)
     # heuristics: if expression contains a LaTeX environment, or multi-line constructs, use pdflatex
