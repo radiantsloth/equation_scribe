@@ -34,8 +34,13 @@ import tempfile
 from pathlib import Path
 from typing import List, Tuple, Optional
 import shutil
-
 from PIL import Image
+import numpy as np
+from equation_scribe.config import (
+    MAX_EQ_WIDTH_FRAC, MAX_EQ_HEIGHT_FRAC,
+    NON_OVERLAP_IOU, MAX_PLACEMENT_ATTEMPTS, ROTATION_AUG_MAX_ANGLE,
+    DEFAULT_DPI,PAGE_WIDTH_IN,PAGE_HEIGHT_IN
+)
 
 # Try to import the repository's render_latex helper (preferred).
 # This function should accept (expr: str, out_path: str, dpi: int, prefer_latex: bool)
@@ -97,51 +102,6 @@ SAMPLE_EQUATIONS = [
     r"\lim_{x \to 0} \frac{\sin x}{x} = 1",
 ]
 
-# Basic page template constants
-PAGE_WIDTH_IN = 8.5   # inches (letter)
-PAGE_HEIGHT_IN = 11.0 # inches
-DEFAULT_DPI = 150
-
-
-# def place_boxes_non_overlapping(page_w: int, page_h: int, 
-    #                              box_sizes: List[Tuple[int,int]],
-    #                              margin: int = 20,
-    #                              max_attempts: int = 200) -> List[Tuple[int,int]]:
-    # """
-    # Given a page size and a list of box widths/heights, attempt to place each
-    # box onto the page without overlapping previously placed boxes.
-
-    # Returns a list of (x, y) top-left coordinates for each box in box_sizes order.
-
-    # This is a greedy randomized algorithm that attempts up to max_attempts per box.
-    # """
-    # placed = []
-    # rects = []  # list of (x0, y0, x1, y1)
-
-    # for (w, h) in box_sizes:
-    #     placed_xy = None
-    #     for attempt in range(max_attempts):
-    #         x = random.randint(margin, max(0, page_w - w - margin))
-    #         y = random.randint(margin, max(0, page_h - h - margin))
-    #         x1, y1 = x + w, y + h
-    #         overlap = False
-    #         for (ax0, ay0, ax1, ay1) in rects:
-    #             # check overlap
-    #             if not (x1 <= ax0 or x >= ax1 or y1 <= ay0 or y >= ay1):
-    #                 overlap = True
-    #                 break
-    #         if not overlap:
-    #             placed_xy = (x, y)
-    #             rects.append((x, y, x1, y1))
-    #             break
-    #     if placed_xy is None:
-    #         # give up and place at random possibly overlapping position
-    #         x = max(margin, min(page_w - w - margin, random.randint(margin, page_w - w - margin)))
-    #         y = max(margin, min(page_h - h - margin, random.randint(margin, page_h - h - margin)))
-    #         placed_xy = (x, y)
-    #         rects.append((x, y, x + w, y + h))
-    #     placed.append(placed_xy)
-    # return placed
 ################################################################################
 # stricter placement: try to place boxes with no overlap, optionally fail early
 ################################################################################
@@ -217,9 +177,12 @@ def make_blank_page(width_px: int, height_px: int, color=(255,255,255)) -> Image
 
 
 def ensure_dirs(*paths: Path):
+    """Ensure each path directory exists (if path is a file, ensure parent exists)."""
     for p in paths:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.mkdir(parents=True, exist_ok=True) if p.suffix == "" else p.parent.mkdir(parents=True, exist_ok=True)
+        if p.suffix:  # a file-like path
+            p.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            p.mkdir(parents=True, exist_ok=True)
 
 ################################################################################
 # helper: compute axis-aligned IoU for two boxes given as (x0,y0,x1,y1)
@@ -292,66 +255,238 @@ def assert_no_overlap_page_annotations(page_ann_boxes: List[Tuple[float,float,fl
             msg_lines.append(f"  ... and {len(bad_pairs)-10} more")
         raise RuntimeError("\n".join(msg_lines))
 
+def _iou(box_a, box_b):
+    """
+    Compute IoU between boxes in form (x0,y0,x1,y1)
+    """
+    ax0, ay0, ax1, ay1 = box_a
+    bx0, by0, bx1, by1 = box_b
+
+    inter_x0 = max(ax0, bx0)
+    inter_y0 = max(ay0, by0)
+    inter_x1 = min(ax1, bx1)
+    inter_y1 = min(ay1, by1)
+
+    inter_w = max(0.0, inter_x1 - inter_x0)
+    inter_h = max(0.0, inter_y1 - inter_y0)
+    inter_area = inter_w * inter_h
+
+    area_a = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+    area_b = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+
+    union_area = area_a + area_b - inter_area
+    if union_area <= 0:
+        return 0.0
+    return inter_area / union_area
+
+def _tight_bbox_from_rgba(img_rgba):
+    """
+    Given a PIL RGBA image that may have transparent padding, return tight bbox of non-transparent pixels
+    as (x0,y0,x1,y1) relative to the image coordinate space.
+    If the image has no alpha, return (0,0,w,h).
+    """
+    if img_rgba.mode != "RGBA":
+        w,h = img_rgba.size
+        return 0,0,w,h
+    alpha = img_rgba.split()[3]
+    bbox = alpha.getbbox()  # returns (left,upper,right,lower)
+    if bbox is None:
+        # fully transparent (shouldn't happen)
+        w,h = img_rgba.size
+        return 0,0,w,h
+    return bbox  # already (x0,y0,x1,y1)
+
 def place_and_annotate_on_page(
-    page_img: Image.Image,
-    eq_images: List[Tuple[str, Image.Image]],
-    page_annotations: list,
-    require_non_overlap: bool = True,
-    margin_frac: float = 0.05,
-    max_attempts_per_box: int = 1000,
-    rotate: bool = False,
+    page_img,
+    eq_images,
+    page_annotations,
+    require_non_overlap=True,
+    margin_frac=0.05,
+    max_attempts_per_box=1000
 ):
     """
-    Places eq_images (list of (latex_str, PIL.Image)) on page_img non-overlapping,
-    crops tight bbox after any rotation, pastes the cropped image, and appends
-    page_annotations entries with bbox in page coords [x0,y0,x1,y1].
+    Place eq_images onto page_img.
+    eq_images: list of (latex_expr, PIL.Image) where images are expected to be 'RGBA' or 'RGB'
+    page_annotations: list to be populated with dicts: {"latex":..., "bbox":[x0,y0,x1,y1]}
 
-    Raises RuntimeError if cannot place without overlap (when require_non_overlap=True).
+    This function:
+    - optionally random-rotates each eq image (small angle)
+    - computes tight rotated bounding box
+    - attempts placements that satisfy "no-overlap" by IoU (NON_OVERLAP_IOU)
     """
     PAGE_W, PAGE_H = page_img.size
+    margin = int(round(margin_frac * PAGE_W))
 
-    # compute tight sizes for each eq image
-    box_sizes = []
-    processed = []
-    for expr, img in eq_images:
-        if img.mode != "RGBA":
-            img = img.convert("RGBA")
-        # If you want rotations, rotate here, e.g.:
-        if rotate:
-            angle = random.uniform(-10, 10)
-            img = img.rotate(angle, expand=True)
+    placed_boxes = []  # store (x0,y0,x1,y1) for IoU checks
 
-        tight = get_tight_bbox(img, bg_thresh=250)
-        if tight is None:
-            tw, th = img.size
-            tight = (0, 0, tw, th)
+    for latex, eq_img in eq_images:
+        # Optionally randomly rotate the EQ image a little. Use ROTATION_AUG_MAX_ANGLE
+        angle = random.uniform(-ROTATION_AUG_MAX_ANGLE, ROTATION_AUG_MAX_ANGLE) if ROTATION_AUG_MAX_ANGLE else 0.0
+
+        # Ensure eq_img RGBA so we can compute tight bbox after rotation
+        if eq_img.mode != "RGBA":
+            eq_img = eq_img.convert("RGBA")
+
+        # Rotate with expand=True so the rotated image fits; use BICUBIC for quality
+        if abs(angle) > 1e-6:
+            rotated = eq_img.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor=(255,255,255,0))
+        else:
+            rotated = eq_img
+
+        # Get tight bbox of non-transparent pixels inside rotated image
+        tight = _tight_bbox_from_rgba(rotated)
         tx0, ty0, tx1, ty1 = tight
-        tw = max(1, int(round(tx1 - tx0)))
-        th = max(1, int(round(ty1 - ty0)))
-        box_sizes.append((tw, th))
-        processed.append((expr, img, tight))
+        # Crop to the tight bbox to remove transparent padding
+        cropped = rotated.crop((tx0, ty0, tx1, ty1))
+        w, h = cropped.size
 
-    # strict placement
-    placements = place_boxes_non_overlapping_strict(
-        PAGE_W, PAGE_H, box_sizes,
-        margin_frac=margin_frac, max_attempts_per_box=max_attempts_per_box, allow_overlap=False
-    )
+        # Enforce page-relative max sizes (already done earlier, but recheck)
+        max_w = int(PAGE_W * MAX_EQ_WIDTH_FRAC)
+        max_h = int(PAGE_H * MAX_EQ_HEIGHT_FRAC)
+        if w > max_w or h > max_h:
+            scale = min(max_w / w, max_h / h)
+            new_w = max(10, int(round(w * scale)))
+            new_h = max(10, int(round(h * scale)))
+            cropped = cropped.resize((new_w, new_h), Image.LANCZOS)
+            w, h = cropped.size
 
-    # paste and create annotations
-    page_boxes = []
-    for (expr, img, tight), (x, y) in zip(processed, placements):
-        tx0, ty0, tx1, ty1 = tight
-        cropped = img.crop((tx0, ty0, tx1, ty1)).convert("RGB")
-        page_img.paste(cropped, (x, y))
-        px0 = float(x); py0 = float(y)
-        px1 = float(x + (tx1 - tx0)); py1 = float(y + (ty1 - ty0))
-        page_boxes.append((px0, py0, px1, py1))
-        page_annotations.append({"latex": expr, "bbox": [px0, py0, px1, py1], "type": "display"})
+        # Placement attempt loop
+        placed = False
+        attempts = 0
+        while not placed and attempts < max_attempts_per_box:
+            attempts += 1
+            # Pick a random top-left so the entire cropped image fits within page
+            x = random.randint(margin, max( margin, PAGE_W - margin - w ))
+            y = random.randint(margin, max( margin, PAGE_H - margin - h ))
 
-    if require_non_overlap:
-        assert_no_overlap_page_annotations(page_boxes, eps=1e-9)
+            # candidate bbox on page coordinates
+            cand = (x, y, x + w, y + h)
 
-    return page_annotations
+            # check within page boundaries (should be guaranteed by randint but double check)
+            if cand[2] > PAGE_W - margin or cand[3] > PAGE_H - margin:
+                continue
+
+            # IoU overlap check
+            if require_non_overlap:
+                any_overlap = False
+                for prev in placed_boxes:
+                    if _iou(cand, prev) > NON_OVERLAP_IOU:
+                        any_overlap = True
+                        break
+                if any_overlap:
+                    continue
+
+            # Good placement found: paste and add annotation
+            # If cropped has alpha, composite it on a white background so the page shows white behind text
+            if cropped.mode == "RGBA":
+                paste_bg = Image.new("RGB", cropped.size, (255,255,255))
+                paste_bg.paste(cropped, mask=cropped.split()[3])  # use alpha
+                page_img.paste(paste_bg, (x, y))
+            else:
+                page_img.paste(cropped.convert("RGB"), (x, y))
+
+            page_annotations.append({
+                "latex": latex,
+                "bbox": [float(x), float(y), float(x + w), float(y + h)]
+            })
+            placed_boxes.append(cand)
+            placed = True
+
+        if not placed:
+            # If we couldn't place without overlapping and require_non_overlap True, fall back to forced placement
+            # try to find minimal-overlap spot: pick the spot with smallest max IoU
+            best_spot = None
+            best_spot_max_iou = float("inf")
+            for _ in range(200):
+                x = random.randint(margin, max( margin, PAGE_W - margin - w ))
+                y = random.randint(margin, max( margin, PAGE_H - margin - h ))
+                cand = (x, y, x + w, y + h)
+                max_iou = 0.0
+                for prev in placed_boxes:
+                    max_iou = max(max_iou, _iou(cand, prev))
+                if max_iou < best_spot_max_iou:
+                    best_spot_max_iou = max_iou
+                    best_spot = (x, y, cand)
+            if best_spot is not None:
+                x,y,cand = best_spot
+                # paste same as above
+                if cropped.mode == "RGBA":
+                    paste_bg = Image.new("RGB", cropped.size, (255,255,255))
+                    paste_bg.paste(cropped, mask=cropped.split()[3])
+                    page_img.paste(paste_bg, (x, y))
+                else:
+                    page_img.paste(cropped.convert("RGB"), (x, y))
+
+                page_annotations.append({
+                    "latex": latex,
+                    "bbox": [float(x), float(y), float(x + w), float(y + h)]
+                })
+                placed_boxes.append(cand)
+            else:
+                # Give up on this box (and log); allow caller to see fewer annotations than eq_images
+                # It's better to skip than to corrupt the dataset
+                # (You can log here for debugging.)
+                continue
+# def place_and_annotate_on_page(
+#     page_img: Image.Image,
+#     eq_images: List[Tuple[str, Image.Image]],
+#     page_annotations: list,
+#     require_non_overlap: bool = True,
+#     margin_frac: float = 0.05,
+#     max_attempts_per_box: int = 1000,
+#     rotate: bool = False,
+# ):
+#     """
+#     Places eq_images (list of (latex_str, PIL.Image)) on page_img non-overlapping,
+#     crops tight bbox after any rotation, pastes the cropped image, and appends
+#     page_annotations entries with bbox in page coords [x0,y0,x1,y1].
+
+#     Raises RuntimeError if cannot place without overlap (when require_non_overlap=True).
+#     """
+#     PAGE_W, PAGE_H = page_img.size
+
+#     # compute tight sizes for each eq image
+#     box_sizes = []
+#     processed = []
+#     for expr, img in eq_images:
+#         if img.mode != "RGBA":
+#             img = img.convert("RGBA")
+#         # If you want rotations, rotate here, e.g.:
+#         if rotate:
+#             angle = random.uniform(-10, 10)
+#             img = img.rotate(angle, expand=True)
+
+#         tight = get_tight_bbox(img, bg_thresh=250)
+#         if tight is None:
+#             tw, th = img.size
+#             tight = (0, 0, tw, th)
+#         tx0, ty0, tx1, ty1 = tight
+#         tw = max(1, int(round(tx1 - tx0)))
+#         th = max(1, int(round(ty1 - ty0)))
+#         box_sizes.append((tw, th))
+#         processed.append((expr, img, tight))
+
+#     # strict placement
+#     placements = place_boxes_non_overlapping_strict(
+#         PAGE_W, PAGE_H, box_sizes,
+#         margin_frac=margin_frac, max_attempts_per_box=max_attempts_per_box, allow_overlap=False
+#     )
+
+#     # paste and create annotations
+#     page_boxes = []
+#     for (expr, img, tight), (x, y) in zip(processed, placements):
+#         tx0, ty0, tx1, ty1 = tight
+#         cropped = img.crop((tx0, ty0, tx1, ty1)).convert("RGB")
+#         page_img.paste(cropped, (x, y))
+#         px0 = float(x); py0 = float(y)
+#         px1 = float(x + (tx1 - tx0)); py1 = float(y + (ty1 - ty0))
+#         page_boxes.append((px0, py0, px1, py1))
+#         page_annotations.append({"latex": expr, "bbox": [px0, py0, px1, py1], "type": "display"})
+
+#     if require_non_overlap:
+#         assert_no_overlap_page_annotations(page_boxes, eps=1e-9)
+
+#     return page_annotations
 
 def generate_synthetic_coco(out_images: Path, out_anns: Path,
                             n_pages: int = 50,
@@ -411,70 +546,95 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
             eq_images = []
             eq_sizes = []
             for expr in eq_exprs:
-                                # render into a temporary PNG (tmpname)
+                # Render using repository's renderer (or fallback)
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpf:
                     tmpname = tmpf.name
-
-                eq_img = None
-
-                # DEBUG: print LaTeX availability so logs make it clear
-                # (this will help in diagnosing intermittent environment/path differences)
-                if _latex_render is None or shutil.which("pdflatex") is None or not HAVE_PDF2IMAGE:
-                    print(f"[DEBUG] pdflatex available? {shutil.which('pdflatex') is not None}; pdf2image available? {HAVE_PDF2IMAGE}")
-
-                # If the expression looks like a LaTeX environment, force the LaTeX route
-                if "\\begin" in expr and _latex_render is not None and shutil.which("pdflatex") and HAVE_PDF2IMAGE:
-                    try:
-                        # Call the real LaTeX renderer directly (bypass matplotlib entirely)
-                        _latex_render(expr, tmpname, dpi=max(dpi, 300))
-                        eq_img = Image.open(tmpname).convert("RGBA")
-                    except Exception as latex_exc:
-                        # If the real LaTeX render fails here, print detailed diagnostics
-                        print("----------------------------------------------------------------------")
-                        print("[ERROR] _latex_render failed for expression:", repr(expr))
-                        print("[ERROR] Exception:", latex_exc)
-                        # attempt matplotlib fallback (it will fail for \\begin{...}, but try anyway)
-                        try:
-                            _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=False)
-                            eq_img = Image.open(tmpname).convert("RGBA")
-                            print("[INFO] matplotlib fallback succeeded for expression:", repr(expr))
-                        except Exception as mpl_exc:
-                            print("[ERROR] matplotlib fallback also failed for expression:", repr(expr))
-                            print(" LaTeX exception:", latex_exc)
-                            print(" Matplotlib exception:", mpl_exc)
-                            # print any nearby .tex/.log files for quick debugging if present
-                            try:
-                                tmpdir = Path(tmpname).parent
-                                for tf in tmpdir.glob("*.log")[:3]:
-                                    print(f" --- contents of {tf.name} ---")
-                                    print(tf.read_text(errors="ignore")[:2000])
-                            except Exception:
-                                pass
-                            eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
-                else:
-                    # Non-environment expressions: use the regular renderer which will try LaTeX
-                    # when appropriate (and fall back to matplotlib).
-                    try:
-                        _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=True)
-                        eq_img = Image.open(tmpname).convert("RGBA")
-                    except Exception as e_first:
-                        # Try fallback (matplotlib)
-                        print("[WARN] render_mathtext(prefer_latex=True) failed; trying matplotlib fallback.", repr(expr))
-                        try:
-                            _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=False)
-                            eq_img = Image.open(tmpname).convert("RGBA")
-                            print("[INFO] matplotlib fallback succeeded for expression:", repr(expr))
-                        except Exception as e_second:
-                            print("[ERROR] Both LaTeX and matplotlib rendering failed for:", repr(expr))
-                            print(" First exception:", e_first)
-                            print(" Second exception:", e_second)
-                            eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
-                # finally: clean up temp file if present
                 try:
-                    if Path(tmpname).exists():
-                        Path(tmpname).unlink()
+                    _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=True)
+                    eq_img = Image.open(tmpname)
+                    # Force load into memory and close file descriptor so we can unlink tmp file safely
+                    eq_img.load()
+                    # Convert to RGBA for rotation/compositing convenience
+                    eq_img = eq_img.convert("RGBA")
                 except Exception:
-                    pass
+                    # Fallback: draw a small placeholder box with the expression text
+                    eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
+                finally:
+                    try:
+                        os.unlink(tmpname)
+                    except Exception:
+                        # If unlink fails, leave the temp to inspect later (or log)
+                        logger = logging.getLogger(__name__)
+                        logger.debug("Could not unlink temp file %s", tmpname)
+
+                # render into a temporary PNG (tmpname)
+                # with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpf:
+                #     tmpname = tmpf.name
+
+                # eq_img = None
+
+                # # DEBUG: print LaTeX availability so logs make it clear
+                # # (this will help in diagnosing intermittent environment/path differences)
+                # if _latex_render is None or shutil.which("pdflatex") is None or not HAVE_PDF2IMAGE:
+                #     print(f"[DEBUG] pdflatex available? {shutil.which('pdflatex') is not None}; pdf2image available? {HAVE_PDF2IMAGE}")
+
+                # # If the expression looks like a LaTeX environment, force the LaTeX route
+                # if "\\begin" in expr and _latex_render is not None and shutil.which("pdflatex") and HAVE_PDF2IMAGE:
+                #     try:
+                #         # Call the real LaTeX renderer directly (bypass matplotlib entirely)
+                #         _latex_render(expr, tmpname, dpi=max(dpi, 300))
+                #         eq_img = Image.open(tmpname).convert("RGBA")
+                #         eq_img.load()
+                #     except Exception as latex_exc:
+                #         # If the real LaTeX render fails here, print detailed diagnostics
+                #         print("----------------------------------------------------------------------")
+                #         print("[ERROR] _latex_render failed for expression:", repr(expr))
+                #         print("[ERROR] Exception:", latex_exc)
+                #         # attempt matplotlib fallback (it will fail for \\begin{...}, but try anyway)
+                #         try:
+                #             _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=False)
+                #             eq_img = Image.open(tmpname).convert("RGBA")
+                #             eq_img.load()
+                #             print("[INFO] matplotlib fallback succeeded for expression:", repr(expr))
+                #         except Exception as mpl_exc:
+                #             print("[ERROR] matplotlib fallback also failed for expression:", repr(expr))
+                #             print(" LaTeX exception:", latex_exc)
+                #             print(" Matplotlib exception:", mpl_exc)
+                #             # print any nearby .tex/.log files for quick debugging if present
+                #             try:
+                #                 tmpdir = Path(tmpname).parent
+                #                 for tf in tmpdir.glob("*.log")[:3]:
+                #                     print(f" --- contents of {tf.name} ---")
+                #                     print(tf.read_text(errors="ignore")[:2000])
+                #             except Exception:
+                #                 pass
+                #             eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
+                # else:
+                #     # Non-environment expressions: use the regular renderer which will try LaTeX
+                #     # when appropriate (and fall back to matplotlib).
+                #     try:
+                #         _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=True)
+                #         eq_img = Image.open(tmpname).convert("RGBA")
+                #         eq_img.load()
+                #     except Exception as e_first:
+                #         # Try fallback (matplotlib)
+                #         print("[WARN] render_mathtext(prefer_latex=True) failed; trying matplotlib fallback.", repr(expr))
+                #         try:
+                #             _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=False)
+                #             eq_img = Image.open(tmpname).convert("RGBA")
+                #             eq_img.load()
+                #             print("[INFO] matplotlib fallback succeeded for expression:", repr(expr))
+                #         except Exception as e_second:
+                #             print("[ERROR] Both LaTeX and matplotlib rendering failed for:", repr(expr))
+                #             print(" First exception:", e_first)
+                #             print(" Second exception:", e_second)
+                #             eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
+                # # finally: clean up temp file if present
+                # try:
+                #     if Path(tmpname).exists():
+                #         Path(tmpname).unlink()
+                # except Exception:
+                #     pass
 
                 if eq_img is None:
                     # Defensive fallback
@@ -485,23 +645,6 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
                 if eq_img is None:
                     # defensive: create a visible placeholder if something odd happened
                     eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
-
-                # with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpf:
-                #     tmpname = tmpf.name
-                # try:
-                #     # Render using repository's renderer (or fallback)
-                #     _render_mathtext(expr, tmpname, dpi=dpi, prefer_latex=True)
-                #     # render_mathtext(expr, tmpname, dpi=dpi)
-                #     eq_img = Image.open(tmpname).convert("RGBA")
-                # except Exception:
-                #     # Fallback: draw a small placeholder box with the expression text
-                #     eq_img = Image.new("RGBA", (int(dpi*0.5), int(dpi*0.2)), (200, 200, 200, 255))
-                # finally:
-                #     # Try to clean up the temp file (Image sometimes keeps it open)
-                #     try:
-                #         os.unlink(tmpname)
-                #     except Exception:
-                #         pass
 
                 # Ensure a reasonable size - enforce max width/height relative to page
                 max_w = int(PAGE_W * 0.6)
@@ -548,16 +691,26 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
             # Strict placement and annotation (handles rotated tight bboxes and IoU checks)
             page_records = []  # will accumulate page-level annotations (latex + bbox)
             # call our helper to place, paste, and populate page_records
+            # place_and_annotate_on_page(
+            #     page_img=page_img,
+            #     eq_images=eq_images,
+            #     page_annotations=page_records,
+            #     require_non_overlap=True,
+            #     margin_frac=0.05,
+            #     max_attempts_per_box=1000,
+            # )
             place_and_annotate_on_page(
                 page_img=page_img,
                 eq_images=eq_images,
                 page_annotations=page_records,
+                rotate_aug=args.rotate_aug,
+                rotate_max=args.rotate_max,
                 require_non_overlap=True,
                 margin_frac=0.05,
                 max_attempts_per_box=1000,
             )
-
-            # Append page_records into COCO annotations (maintain ann_id)
+            # now page_records contains dicts with latex, bbox, angle
+            # append them into coco["annotations"] as in your original code
             for rec in page_records:
                 x0, y0, x1, y1 = rec["bbox"]
                 w = int(round(x1 - x0))
@@ -572,8 +725,27 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
                     "paper_id": f"paper{paper_idx:03d}",
                     "page_index": page_idx,
                     "latex": rec["latex"],
+                    "angle": rec.get("angle", 0.0),
                 })
                 ann_id += 1
+
+            # Append page_records into COCO annotations (maintain ann_id)
+            # for rec in page_records:
+            #     x0, y0, x1, y1 = rec["bbox"]
+            #     w = int(round(x1 - x0))
+            #     h = int(round(y1 - y0))
+            #     coco["annotations"].append({
+            #         "id": ann_id,
+            #         "image_id": img_id,
+            #         "category_id": 1,
+            #         "bbox": [int(round(x0)), int(round(y0)), w, h],
+            #         "area": int(w * h),
+            #         "iscrowd": 0,
+            #         "paper_id": f"paper{paper_idx:03d}",
+            #         "page_index": page_idx,
+            #         "latex": rec["latex"],
+            #     })
+            #     ann_id += 1
 
             # Save the page image
             page_img.save(fpath, format="PNG", dpi=(dpi, dpi))
@@ -608,12 +780,22 @@ def parse_args():
     p.add_argument("--dpi", type=int, default=DEFAULT_DPI, help="DPI for rendered pages.")
     p.add_argument("--seed", type=int, default=0, help="Random seed.")
     p.add_argument("--rotate", action="store_true", help="Enable rotation augmentation for equation renderings")
+    p.add_argument("--rotate-aug", action="store_true",
+                    help="Enable per-equation rotation augmentation when placing equations.")
+    p.add_argument("--rotate-max", type=float, default=15.0,
+                        help="Maximum absolute rotation angle (degrees) for per-equation augmentation.")
+    p.add_argument("--seed", type=int, default=None, help="Random seed for reproducible synthetic generation.")
 
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    ### SET RANDOM SEED IF PROVIDED ###
+    if args.seed is not None:
+        import random, numpy as np
+        random.seed(args.seed)
+        np.random.seed(args.seed)
     generate_synthetic_coco(
         out_images=Path(args.out_images),
         out_anns=Path(args.out_anns),
