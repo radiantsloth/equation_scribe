@@ -17,11 +17,13 @@ conda create -n eqscribe python=3.11 -y
 conda activate eqscribe
 pip install --upgrade pip
 pip install -r requirements.txt
+```
 
 If you don't have requirements.txt, install the main packages:
 
 ```bash
 pip install pillow numpy matplotlib pdf2image pytesseract ultralytics portalocker sympy pdfplumber PyMuPDF torch torchvision
+```
 
 Note: torch installation depends on your CUDA / CPU. See https://pytorch.org/get-started/locally/  for the correct command.
 
@@ -60,7 +62,7 @@ Note: torch installation depends on your CUDA / CPU. See https://pytorch.org/get
 ```bash
 sudo apt update
 sudo apt install -y texlive-latex-base texlive-latex-recommended texlive-fonts-recommended texlive-latex-extra poppler-utils tesseract-ocr nodejs npm
-
+```
 
 Adjust package names depending on distro.
 
