@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """
-synthetic_coco.py
+synthetic_coco.py — generate synthetic pages with rendered LaTeX equations.
 
-Generate a synthetic COCO-style annotations file and synthetic page images,
-organized into multiple "papers" so that downstream split-by-paper tooling
-can produce both train and val splits.
+This script renders LaTeX expressions to images, composes them onto synthetic
+"page" images, and emits COCO-format annotations suitable for object detection
+training.
 
-Usage (from repo root):
-  python equation_scribe/detector/synthetic_coco.py \
-    --out-images detector/data/images/synth \
-    --out-anns detector/data/annotations/instances_all.json \
-    --n-pages 50 \
-    --n-papers 5 \
-    --eqs-per-page 4 \
-    --dpi 150
+Usage (CLI):
+    python -m equation_scribe.detector.synthetic_coco \
+      --out-images detector/data/images/synth \
+      --out-anns detector/data/annotations/instances_all.json \
+      --n-pages 50 --eqs-per-page 6 --dpi 150 --rotate-aug --rotate-max 15 --seed 123
 
-Notes:
-* Images will be named like `paper000_page_0000.png`, etc.  This is required
-  by split_coco_by_paper.py so it can detect which pages belong to the same
-  paper.
-* The script attempts to use the local `equation_scribe.detector.render_latex.render_mathtext`
-  renderer if available (that renderer uses LaTeX or matplotlib).  If that's
-  unavailable, a matplotlib-based fallback renderer is used.
+Important flags:
+    --rotate-aug       enable per-equation rotation augmentation
+    --rotate-max       maximum absolute rotation angle in degrees (default 15)
+    --seed / --random-seed  reproducible RNG seed for synthetic generation
+
+Dependencies:
+    - pdflatex/poppler (optional, used by render_latex)
+    - PIL/Pillow, numpy
 """
+
 
 from __future__ import annotations
 import argparse
@@ -291,12 +290,29 @@ def place_and_annotate_on_page(
     max_attempts_per_box: int = 1000,
 ):
     """
-    Place eq_images (list of tuples (latex_str, PIL.Image)) onto page_img
-    and populate page_annotations with dicts {"latex": ..., "bbox": [x0,y0,x1,y1]}.
-    Handles per-equation rotation (if rotate_aug True), tight-bbox cropping, IoU checks, and pasting.
+    Place rendered equation images onto a page, ensuring non-overlap (optional),
+    cropping rotated images tightly and producing annotations.
 
-    Returns: None (page_img is modified in place; page_annotations appended).
+    Args:
+        page_img (PIL.Image.Image): page image to paste equations onto (modified in-place).
+        eq_images (List[Tuple[str, PIL.Image.Image]]): list of (latex_str, image).
+        page_annotations (List[dict]): list to append annotations to. Each annotation is
+            appended as {"latex": str, "bbox": [x0,y0,x1,y1], "angle": float}.
+        rotate_aug (bool): whether to randomly rotate each equation image.
+        rotate_max (float): maximum absolute rotation angle in degrees.
+        require_non_overlap (bool): if True, attempts to place boxes with IoU <= NON_OVERLAP_IOU.
+        margin_frac (float): page margin fraction (of page width) to avoid placing near edges.
+        max_attempts_per_box (int): maximum attempts to find a valid placement for a box.
+
+    Returns:
+        None
+
+    Notes:
+        - The function pastes equations (composited on white) onto `page_img` and
+          appends annotation dicts into `page_annotations`.
+        - Coordinates in the returned bbox are image pixel coordinates (x0,y0,x1,y1).
     """
+        
     PAGE_W, PAGE_H = page_img.size
     margin = int(round(margin_frac * PAGE_W))
     placed_boxes = []
@@ -393,16 +409,22 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
                             dpi: int = DEFAULT_DPI,
                             seed: int = 0,):
     """
-    Generate synthetic pages and a COCO-style annotations JSON file containing
-    the synthetic equation boxes.
+    Generate synthetic pages and COCO annotations.
 
-    out_images: directory to write page images (PNG)
-    out_anns:  path to write JSON (COCO) annotations
-    n_pages:  total number of pages across all papers
-    n_papers: number of papers to split the pages into
-    eqs_per_page: number of synthetic equations to place per page
-    dpi:     dots per inch for image generation
-    seed:    random seed for repeatability
+    Args:
+        out_images (Path): directory where generated images will be saved.
+        out_anns (Path): path to the COCO annotations JSON file to write.
+        n_pages (int): number of pages to generate.
+        eqs_per_page (int): number of equations per page.
+        dpi (int): DPI used for equation rendering and saved images.
+        rotate_aug (bool): whether to apply per-equation rotation.
+        rotate_max (float): maximum absolute angle (degrees) to rotate equations by.
+        seed (Optional[int]): random seed for reproducible generation.
+    Returns:
+        None
+
+    Side effects:
+        Writes image files to `out_images` and a COCO JSON file to `out_anns`.
     """
     random.seed(seed)
 
@@ -541,6 +563,17 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
     # Write COCO annotations
     with out_anns.open("w", encoding="utf-8") as f:
         json.dump(coco, f, indent=2, ensure_ascii=False)
+    # optional: emit recognition pairs automatically (if requested via CLI flag)
+    if args.emit_recognition_jsonl:
+        try:
+            from equation_scribe.detector.make_recognition_pairs import build_pairs_from_coco
+            pairs_out_dir = Path(out_images.parent) / "recognition_pairs" / "crops"
+            pairs_jsonl = Path(out_images.parent) / "recognition_pairs" / Path(out_anns).name.replace("instances_all.json", "recognition_all.jsonl")
+            build_pairs_from_coco(out_anns, out_images, pairs_out_dir, pairs_jsonl, pad_px=args.recog_pad, deskew=args.recog_deskew)
+            print(f"Emitted recognition JSONL to {pairs_jsonl}")
+        except Exception as e:
+            print(f"WARNING: failed to emit recognition pairs: {e}")
+
 
     print(f"Wrote {len(coco['images'])} images and {len(coco['annotations'])} annotations.")
     print(f"Images directory: {out_images.resolve()}")
@@ -561,6 +594,10 @@ def parse_args():
     p.add_argument("--rotate-max", type=float, default=15.0,
                         help="Maximum absolute rotation angle (degrees) for per-equation augmentation.")
     p.add_argument("--seed", type=int, default=None, help="Random seed for reproducible synthetic generation.")
+    p.add_argument("--emit-recognition-jsonl", action="store_true", help="Emit recognition JSONL/crops after generating COCO")
+    p.add_argument("--recog-pad", type=int, default=4, help="Padding in px for recognition crop")
+    p.add_argument("--recog-deskew", action="store_true", help="Attempt to deskew recognition crops")
+
 
     return p.parse_args()
 
