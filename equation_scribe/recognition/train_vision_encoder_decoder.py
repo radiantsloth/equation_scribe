@@ -31,8 +31,54 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import (
     VisionEncoderDecoderModel,
     AutoConfig,
-    AutoFeatureExtractor,
 )
+from torch.optim import AdamW
+
+# Prefer AutoImageProcessor (replacement for AutoFeatureExtractor)
+try:
+    from transformers import AutoImageProcessor as _AutoImageProcessor
+except Exception:
+    # fallback to AutoFeatureExtractor on very old transformers versions
+    from transformers import AutoFeatureExtractor as _AutoImageProcessor
+
+class Collator:
+    """
+    Top-level callable collator so it can be pickled on Windows.
+    Stores references to image_processor and tokenizer.
+    """
+    def __init__(self, image_processor, tokenizer, max_target_length: int = 256):
+        self.image_processor = image_processor
+        self.tokenizer = tokenizer
+        self.max_target_length = max_target_length
+
+    def __call__(self, batch):
+        images = [item["image"] for item in batch]
+        texts = [item["text"] for item in batch]
+
+        encoding = self.image_processor(images=images, return_tensors="pt")
+        pixel_values = encoding["pixel_values"]
+
+        # Tokenize / pad
+        token_ids = [self.tokenizer.encode(t, add_bos=True, add_eos=True) for t in texts]
+        max_len = min(max(len(x) for x in token_ids), self.max_target_length)
+        labels = []
+        for ids in token_ids:
+            if len(ids) > max_len:
+                ids = ids[:max_len]
+                if ids[-1] != self.tokenizer.eos_token_id:
+                    ids[-1] = self.tokenizer.eos_token_id
+            pad_len = max_len - len(ids)
+            ids_padded = ids + [self.tokenizer.pad_token_id] * pad_len
+            # replace pad token id with -100 for HF loss
+            ids_padded = [i if i != self.tokenizer.pad_token_id else -100 for i in ids_padded]
+            labels.append(ids_padded)
+        labels = torch.tensor(labels, dtype=torch.long)
+
+        return {
+            "pixel_values": pixel_values,
+            "labels": labels,
+            "raw_texts": texts,
+        }
 
 # Use the CharTokenizer implemented above or import it if present
 try:
@@ -109,46 +155,6 @@ class RecognitionJsonlDataset(Dataset):
                 pass
         return {"image": img, "text": text, "image_path": img_path}
 
-
-def collate_fn(batch: List[Dict], feature_extractor, tokenizer: CharTokenizer, max_target_length: int = 256):
-    """
-    Collate:
-    - Run feature_extractor on list of images -> pixel_values (torch tensor)
-    - Tokenize texts with CharTokenizer -> padded label tensor with -100 for pad (as HF expects)
-    """
-    images = [item["image"] for item in batch]
-    texts = [item["text"] for item in batch]
-
-    # feature extractor returns pixel_values as a list when return_tensors='pt' is used on a list
-    encoding = feature_extractor(images=images, return_tensors="pt")
-    pixel_values = encoding["pixel_values"]  # shape (B, C, H, W)
-
-    # Tokenize
-    token_ids = [tokenizer.encode(t, add_bos=True, add_eos=True) for t in texts]
-    # pad to max length in this batch or the provided max_target_length
-    max_len = min(max(len(x) for x in token_ids), max_target_length)
-    labels = []
-    for ids in token_ids:
-        if len(ids) > max_len:
-            ids = ids[:max_len]
-            if ids[-1] != tokenizer.eos_token_id:
-                ids[-1] = tokenizer.eos_token_id
-        pad_len = max_len - len(ids)
-        ids_padded = ids + [tokenizer.pad_token_id] * pad_len
-        # Replace pad token id with -100 for computing loss with HuggingFace models
-        ids_padded = [i if i != tokenizer.pad_token_id else -100 for i in ids_padded]
-        labels.append(ids_padded)
-
-    labels = torch.tensor(labels, dtype=torch.long)
-
-    batch_out = {
-        "pixel_values": pixel_values,
-        "labels": labels,
-        "raw_texts": texts,
-    }
-    return batch_out
-
-
 def evaluate(model, dataloader, tokenizer: CharTokenizer, device: torch.device, num_examples: int = 20, gen_kwargs: dict = None):
     model.eval()
     if gen_kwargs is None:
@@ -199,6 +205,13 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_every", type=int, default=1, help="Save checkpoint every N epochs")
     parser.add_argument("--deskew", action="store_true", help="Deskew crops at dataset load time")
+    parser.add_argument("--num-workers", type=int, default=0 if os.name == "nt" else 2, help="Number of DataLoader workers")
+    parser.add_argument("--freeze-encoder-epochs", type=int, default=0,
+                    help="Number of initial epochs to keep the encoder frozen. 0 = no freezing.")
+    parser.add_argument("--encoder-unfreeze-lr", type=float, default=None,
+                    help="LR to use for encoder when unfrozen. If not set, uses args.lr * 0.1.")
+
+    
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -214,9 +227,13 @@ def main():
     tokenizer.save(os.path.join(args.output_dir, "char_tokenizer.json"))
     logger.info("Tokenizer vocab size: %d", tokenizer.vocab_size)
 
-    # Feature extractor and model
-    feature_extractor = AutoFeatureExtractor.from_pretrained(args.encoder_model)
-
+    # Image processor / feature extractor and model
+    # Use AutoImageProcessor (new API). For backward compatibility we alias to
+    try:
+        image_processor = _AutoImageProcessor.from_pretrained(args.encoder_model,use_fast=True)
+    except Exception:
+        image_processor = _AutoImageProcessor.from_pretrained(args.encoder_model,use_fast=False)
+    
     model = VisionEncoderDecoderModel.from_encoder_decoder_pretrained(
         args.encoder_model, args.decoder_model
     )
@@ -241,23 +258,56 @@ def main():
 
     model.to(device)
 
-    # Dataset and dataloaders
+    # Optionally freeze encoder for the first N epochs
+    if args.freeze_encoder_epochs > 0:
+        logger.info("Freezing encoder for first %d epoch(s)", args.freeze_encoder_epochs)
+        for p in model.encoder.parameters():
+            p.requires_grad = False
+
+
+    # create collator (pickleable top-level class)
+    collator = Collator(image_processor, tokenizer, max_target_length=args.max_target_length)
+
+    # Create datasets first (so variables exist)
     train_ds = RecognitionJsonlDataset(args.train_jsonl, shuffle=True, deskew=args.deskew)
     val_ds = RecognitionJsonlDataset(args.val_jsonl, shuffle=False, deskew=args.deskew)
 
-    def collate(batch):
-        return collate_fn(batch, feature_extractor, tokenizer, max_target_length=args.max_target_length)
+    # Create dataloaders using the collator
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collator,
+        num_workers=args.num_workers,
+    )
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=max(1, args.batch_size // 2), shuffle=False, collate_fn=collate, num_workers=2)
-
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=max(1, args.batch_size // 2),
+        shuffle=False,
+        collate_fn=collator,
+        num_workers=args.num_workers,
+    )
     # optimizer + scheduler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = AdamW(model.parameters(), lr=args.lr)
     total_steps = len(train_loader) * args.epochs
-    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=total_steps)
+    scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=1.0,
+        end_factor=0.0,
+        total_iters=total_steps,
+    )
 
     best_val = None
     for epoch in range(1, args.epochs + 1):
+        # If we asked to freeze for N epochs, unfreeze encoder at epoch N+1
+        if args.freeze_encoder_epochs > 0 and epoch == args.freeze_encoder_epochs + 1:
+            logger.info("Unfreezing encoder at epoch %d", epoch)
+            for p in model.encoder.parameters():
+                p.requires_grad = True
+            # Note: we keep the same optimizer & LR for simplicity.
+            # For most small experiments, this is perfectly fine.
+
         model.train()
         running_loss = 0.0
         for batch_idx, batch in enumerate(train_loader, start=1):
@@ -280,23 +330,36 @@ def main():
 
         # evaluation
         model.eval()
-        metrics = evaluate(model, val_loader, tokenizer, device, num_examples=200, gen_kwargs={"max_length": 200, "num_beams": 3})
-        logger.info(f"Epoch {epoch} eval: exact_match={metrics['exact_match']:.4f}, norm_edit={metrics['norm_edit']:.4f}")
+        metrics = evaluate(
+            model,
+            val_loader,
+            tokenizer,
+            device,
+            num_examples=200,
+            gen_kwargs={"max_length": 200, "num_beams": 3},
+        )
+        logger.info(
+            f"Epoch {epoch} eval: exact_match={metrics['exact_match']:.4f}, "
+            f"norm_edit={metrics['norm_edit']:.4f}"
+        )
         for g, p, n in metrics["examples"]:
             logger.info("EXAMPLE gold: %s", g)
             logger.info("EXAMPLE pred: %s", p)
             logger.info("norm_edit: %.4f", n)
 
-        # save
+        # save checkpoint
         if args.save_every and (epoch % args.save_every == 0):
             ckpt_dir = os.path.join(args.output_dir, f"epoch_{epoch}")
             os.makedirs(ckpt_dir, exist_ok=True)
             model.save_pretrained(ckpt_dir)
-            # save tokenizer too
             tokenizer.save(os.path.join(ckpt_dir, "char_tokenizer.json"))
+            try:
+                image_processor.save_pretrained(ckpt_dir)
+            except Exception:
+                pass
             logger.info("Saved checkpoint to %s", ckpt_dir)
 
-        # track best val by normalized edit
+        # track best val by normalized edit distance (lower is better)
         score = metrics["norm_edit"]
         if best_val is None or score < best_val:
             best_val = score
@@ -304,10 +367,13 @@ def main():
             os.makedirs(best_dir, exist_ok=True)
             model.save_pretrained(best_dir)
             tokenizer.save(os.path.join(best_dir, "char_tokenizer.json"))
+            try:
+                image_processor.save_pretrained(best_dir)
+            except Exception:
+                pass
             logger.info("Saved best model to %s", best_dir)
 
     logger.info("Training complete. Best val norm_edit=%s", best_val)
-
 
 if __name__ == "__main__":
     main()
