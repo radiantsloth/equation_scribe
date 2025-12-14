@@ -56,53 +56,66 @@ def crop_page_image(page_img: Image.Image, bbox: Tuple[int, int, int, int]) -> I
 
 
 def deskew_crop(
-    crop_img: Image.Image, *,
+    crop_img: Image.Image,
+    *,
     return_angle: bool = True,
     expand: bool = True,
 ) -> Tuple[Image.Image, Optional[float]]:
     """
-    Deskew a crop by estimating its rotation angle using OpenCV's minAreaRect.
+    Deskew a crop by estimating the dominant orientation of foreground pixels using PCA.
 
-    Returns (deskewed_image, angle_in_degrees). Angle is positive if rotated clockwise
-    to produce an upright image (i.e., you should rotate image by -angle to deskew — but
-    this function already applies that rotation).
+    Returns (deskewed_image, angle_in_degrees). Angle is the absolute magnitude of the
+    rotation (in degrees) needed to deskew the image (so a 15° rotated crop returns ~15.0).
 
-    Requires 'cv2' to be installed. If cv2 is missing, ImportError is raised.
-    The function converts the image to gray, thresholds, finds the largest non-background
-    contour area, computes minAreaRect, and derives the angle.
-
-    expand: if True, uses PIL.rotate(expand=True) to avoid cropping after rotation.
+    Uses OpenCV for adaptive thresholding / Otsu. If cv2 is not available, raises ImportError.
     """
     try:
-        import cv2  # imported locally to avoid failing module import if not installed
+        import cv2
     except Exception as e:
         raise ImportError("deskew_crop requires opencv (cv2). Install opencv-python.") from e
 
-    # Convert PIL -> numpy BGR for opencv; we only need gray
-    arr = np.array(crop_img.convert("L"))
-    # threshold (Otsu)
-    _, th = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    # find coords of non-zero pixels
-    coords = cv2.findNonZero(th)
-    if coords is None:
-        # Nothing to deskew (blank crop)
+    # Convert image to gray numpy array
+    gray = np.array(crop_img.convert("L"))
+
+    # Apply Otsu thresholding (invert so foreground is +)
+    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Find foreground coordinates (x,y) as floats for PCA
+    ys, xs = np.where(th > 0)
+    if xs.size == 0 or ys.size == 0 or xs.size < 5:
+        # nothing to deskew or too few points
         return (crop_img.copy(), 0.0) if return_angle else (crop_img.copy(), None)
 
-    # Fit a min area rect to the set of points
-    rect = cv2.minAreaRect(coords)
-    ((cx, cy), (width, height), angle) = rect  # angle in degrees: (-90, 0]
-    # Convert angle to a "rotation" that will deskew: cv2 angle semantics are awkward
-    if width < height:
-        angle = angle + 90.0
+    pts = np.column_stack((xs.astype(np.float64), ys.astype(np.float64)))  # (N, 2)
 
-    # angle now is the angle to rotate the image to make rect axis-aligned.
-    # PIL.rotate rotates counter-clockwise for positive angles, but our angle is how much the box
-    # is rotated from horizontal. We want to rotate by -angle to deskew (clockwise).
-    deskew_angle = -angle
+    # Center the points
+    mean = pts.mean(axis=0)
+    pts_centered = pts - mean
 
-    pil_rot = crop_img.rotate(deskew_angle, resample=Image.BICUBIC, expand=expand, fillcolor=(255,255,255))
-    return (pil_rot, abs(angle)) if return_angle else (pil_rot, None)
+    # Covariance and principal eigenvector
+    cov = np.dot(pts_centered.T, pts_centered) / (pts_centered.shape[0] - 1)
+    # Numeric-stable eigen decomposition (2x2)
+    eigvals, eigvecs = np.linalg.eigh(cov)  # ascending eigenvalues
+    principal = eigvecs[:, np.argmax(eigvals)]  # shape (2,)
 
+    # principal is a 2-vector [vx, vy], compute angle in degrees
+    angle_rad = math.atan2(principal[1], principal[0])
+    angle_deg = math.degrees(angle_rad)
+
+    # We want angle in [-90, 90)
+    if angle_deg <= -90.0:
+        angle_deg += 180.0
+    elif angle_deg > 90.0:
+        angle_deg -= 180.0
+
+    # Because text is typically horizontal, we want the minimal angle to rotate
+    # the crop to upright. If angle is e.g. 80°, rotating by -80 deskews;
+    # return the absolute magnitude for the test convenience.
+    deskew_angle = -angle_deg
+
+    pil_rot = crop_img.rotate(deskew_angle, resample=Image.BICUBIC, expand=expand, fillcolor=(255, 255, 255))
+
+    return (pil_rot, abs(angle_deg)) if return_angle else (pil_rot, None)
 
 def normalize_for_recognition(
     crop_img: Image.Image,

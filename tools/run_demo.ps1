@@ -1,8 +1,62 @@
-# powershell -ExecutionPolicy Bypass -File ".\tools\run_demo.ps1"
+<#
+.SYNOPSIS
+    Run end-to-end demo for Equation Scribe detector + synthetic data + quick training.
 
-# # tools/run_demo.ps1
-# # Usage: from repo root
-# #   .\tools\run_demo.ps1
+.DESCRIPTION
+    This demo orchestrates:
+      1. Synthetic dataset generation (render LaTeX -> PNG, compose pages, COCO annotations)
+      2. Split into train/val, produce tiles, and create YOLO dataset
+      3. Quick YOLOv8 training (small number of epochs)
+      4. Inference on a sample page (detect equation boxes)
+      5. Optional downstream recognition steps (pair creation)
+
+    Purpose: quick smoke test of the detector pipeline. The script is NOT for full
+    production training — adjust parameters (epochs, batch size, dataset size) as needed.
+
+.PREREQUISITES
+    On Windows:
+      - Anaconda/Miniconda (recommended). Create the `eqscribe` environment and install
+        Python dependencies (see README).
+      - MiKTeX or TeX Live (pdflatex) for LaTeX rendering of complex math.
+      - poppler (pdftoppm) for pdf -> png conversion when using pdflatex route.
+      - Tesseract OCR for OCR fallback when processing scanned PDFs.
+      - Node.js & npm (for the frontend; optional for run_demo).
+      - Ultralytics (yolo) package for YOLOv8 training (CPU/GPU).
+      - CUDA + compatible PyTorch for GPU training (optional but faster).
+
+    Important PATHs:
+      - Ensure pdflatex, pdftoppm (poppler), and tesseract are in PATH.
+      - If not in PATH, set the appropriate variables or add them in your system environment.
+
+.USAGE
+    Open a PowerShell console with ExecutionPolicy set to allow script execution:
+      powershell -ExecutionPolicy Bypass
+
+    Activate your environment (example):
+      conda activate eqscribe
+
+    Run the demo (quick run):
+      powershell -ExecutionPolicy Bypass -File ".\tools\run_demo.ps1"
+
+    If you want a reproducible synthetic run:
+      powershell -ExecutionPolicy Bypass -File ".\tools\run_demo.ps1" -nPages 5 -eqsPerPage 6 -rotateAug $true -rotateMax 12 -seed 123
+
+NOTES AND TROUBLESHOOTING
+    - If pdflatex fails: check `pdflatex --version`. MiKTeX on Windows sometimes needs packages installed on demand; run MiKTeX Console and make sure shell calls to pdflatex succeed.
+    - If pdf2image fails: ensure poppler's `pdftoppm` is installed and on PATH.
+    - If tesseract fails: check `tesseract --version` and ensure its path is set.
+    - If YOLO/Ultralytics fails or complains about dataset paths, verify the detector YAML `detector/detector.yaml` paths and that `detector/data/images/...` and `detector/data/annotations` exist and are non-empty.
+    - To reset state: the script can be re-run after cleaning output directories. See the CLEANUP section below.
+    - For Windows fsevents / node errors: these are Mac-only packages; ignore on Windows. If `npm install` throws fsevents 404, remove optional dependencies or run `npm install --no-optional`.
+
+CLEANUP (manual commands)
+    # Remove synthetic images and annotations; useful before re-running the demo:
+    Remove-Item -Recurse -Force detector\data\images\synth* -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force detector\data\annotations\* -ErrorAction SilentlyContinue
+    # Remove YOLO run directory:
+    Remove-Item -Recurse -Force runs\detect\eq_detector_quick* -ErrorAction SilentlyContinue
+
+#>
 
 
 $ErrorActionPreference = 'Stop'
@@ -17,11 +71,11 @@ function Run-Python([string]$args) {
     if ($LASTEXITCODE -ne 0) { throw "Command failed: python $args" }
 }
 
-# # Clear previous synthetic data:
-# python tools/clear_dirs.py --clear-data --data-dir detector/data --annotations-file detector/data/annotations/instances_all.json --yes
-
-# # Clear previous runs:
-# python tools/clear_dirs.py --clear-runs --runs-dir runs/detect --prefix eq_detector --yes
+# --------------- LaTeX rendering step ---------------
+# This step uses pdflatex -> pdf2image. If pdflatex fails, check:
+#   pdflatex --version
+# and ensure poppler's pdftoppm is installed (pdf2image depends on it).
+# On Windows, MiKTeX may need packages installed via MiKTeX Console.
 
 # 1) Generate synthetic pages (small dataset)
 Write-Host "`n1) Generating synthetic data..." -ForegroundColor Green
@@ -35,6 +89,12 @@ python equation_scribe\detector\split_coco_by_paper.py --coco detector/data/anno
 # 3) Preprocess (optional; good for scan-like images)
 Write-Host "`n3) Preprocessing pages (denoise, deskew, CLAHE, binarize)..." -ForegroundColor Green
 python equation_scribe\detector\preprocess.py --input detector/data/images/synth --output detector/data/images/synth_pre --denoise --deskew --clahe --binarize
+
+# --------------- YOLO quick training ---------------
+# Uses Ultralytics YOLOv8. For GPU training ensure torch + CUDA are installed.
+# If "images not found" or dataset errors occur, check the generated COCO files:
+#   detector/data/annotations/instances_tiles_*.json
+# and the image folders under detector/data/images/tiles_{train,val}.
 
 # 4) Tile the train set (creates tiles and tile-level COCO)
 Write-Host "`n4) Tiling (train set)..." -ForegroundColor Green
