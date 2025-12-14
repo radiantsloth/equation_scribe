@@ -9,6 +9,8 @@ runs/
 *.ckpt
 *.dvc/cache/
 .env
+*.csv
+*.tsv
 
 __pycache__/
 *.log

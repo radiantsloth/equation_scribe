@@ -20,6 +20,8 @@ import logging
 import math
 import os
 import random
+import time
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -40,6 +42,64 @@ try:
 except Exception:
     # fallback to AutoFeatureExtractor on very old transformers versions
     from transformers import AutoFeatureExtractor as _AutoImageProcessor
+
+# fast_levenshtein helper: prefer rapidfuzz -> python-Levenshtein -> editdistance -> python fallback
+try:
+    # rapidfuzz (preferred)
+    from rapidfuzz.distance import Levenshtein as _rf_lev
+    # print("Using rapidfuzz")
+    def levenshtein(a: str, b: str) -> int:
+        # rapidfuzz returns integer distance
+        return int(_rf_lev.distance(a, b))
+
+    FAST_LEVENSHTEIN = "rapidfuzz"
+except Exception:
+    try:
+        # python-Levenshtein
+        import Levenshtein as _pl_lev
+
+        def levenshtein(a: str, b: str) -> int:
+            return int(_pl_lev.distance(a, b))
+
+        FAST_LEVENSHTEIN = "python-Levenshtein"
+    except Exception:
+        try:
+            # editdistance
+            import editdistance as _ed
+
+            def levenshtein(a: str, b: str) -> int:
+                return int(_ed.eval(a, b))
+
+            FAST_LEVENSHTEIN = "editdistance"
+        except Exception:
+            # pure Python fallback (same as before)
+            FAST_LEVENSHTEIN = "python-fallback"
+
+            def levenshtein(a: str, b: str) -> int:
+                # simple DP O(len(a)*len(b)) Python implementation
+                if a == b:
+                    return 0
+                la, lb = len(a), len(b)
+                if la == 0:
+                    return lb
+                if lb == 0:
+                    return la
+                # ensure la <= lb to use less memory
+                if la > lb:
+                    a, b = b, a
+                    la, lb = lb, la
+                prev = list(range(lb + 1))
+                for i in range(1, la + 1):
+                    cur = [i] + [0] * lb
+                    ai = a[i - 1]
+                    for j in range(1, lb + 1):
+                        cost = 0 if ai == b[j - 1] else 1
+                        cur[j] = min(prev[j] + 1,      # deletion
+                                     cur[j - 1] + 1,   # insertion
+                                     prev[j - 1] + cost)  # substitution
+                    prev = cur
+                return prev[lb]
+
 
 class Collator:
     """
@@ -136,26 +196,26 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def levenshtein(a: str, b: str) -> int:
-    """Classic dynamic programming Levenshtein distance"""
-    if a == b:
-        return 0
-    la, lb = len(a), len(b)
-    if la == 0:
-        return lb
-    if lb == 0:
-        return la
-    dp = list(range(lb + 1))
-    for i in range(1, la + 1):
-        prev, dp[0] = dp[0], i
-        for j in range(1, lb + 1):
-            cur = dp[j]
-            if a[i - 1] == b[j - 1]:
-                dp[j] = prev
-            else:
-                dp[j] = 1 + min(prev, dp[j - 1], dp[j])
-            prev = cur
-    return dp[lb]
+# def levenshtein(a: str, b: str) -> int:
+#     """Classic dynamic programming Levenshtein distance"""
+#     if a == b:
+#         return 0
+#     la, lb = len(a), len(b)
+#     if la == 0:
+#         return lb
+#     if lb == 0:
+#         return la
+#     dp = list(range(lb + 1))
+#     for i in range(1, la + 1):
+#         prev, dp[0] = dp[0], i
+#         for j in range(1, lb + 1):
+#             cur = dp[j]
+#             if a[i - 1] == b[j - 1]:
+#                 dp[j] = prev
+#             else:
+#                 dp[j] = 1 + min(prev, dp[j - 1], dp[j])
+#             prev = cur
+#     return dp[lb]
 
 
 class RecognitionJsonlDataset(Dataset):
@@ -192,6 +252,56 @@ class RecognitionJsonlDataset(Dataset):
                 pass
         return {"image": img, "text": text, "image_path": img_path}
 
+# Helper: safely convert ids/tokens -> human-readable string
+def ids_to_text(token_ids, tokenizer):
+    """
+    Convert a list / tensor of token ids to a human-readable string.
+    Uses tokenizer.decode(...) when possible and robustly falls back to
+    convert_tokens_to_string(). Also strips the byte-level 'Ġ' marker if present.
+    """
+    if token_ids is None:
+        return ""
+
+    # convert tensor/ndarray to Python list
+    if isinstance(token_ids, torch.Tensor):
+        token_ids = token_ids.cpu().tolist()
+    elif isinstance(token_ids, np.ndarray):
+        token_ids = token_ids.tolist()
+
+    # flatten if nested single-dim (sometimes we get [[...]])
+    if isinstance(token_ids, (list, tuple)) and len(token_ids) == 1 and isinstance(token_ids[0], (list, tuple)):
+        token_ids = token_ids[0]
+
+    # ensure ints
+    try:
+        token_ids = [int(x) for x in token_ids]
+    except Exception:
+        # final fallback: stringify whatever we were given
+        return str(token_ids)
+
+    if len(token_ids) == 0:
+        return ""
+
+    # Primary attempt: decode with tokenizer
+    try:
+        text = tokenizer.decode(token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+    except Exception:
+        text = None
+
+    # Fallback: convert ids -> tokens -> string
+    if text is None or text == "":
+        try:
+            tokens = tokenizer.convert_ids_to_tokens(token_ids)
+            text = tokenizer.convert_tokens_to_string(tokens)
+        except Exception:
+            text = " ".join(map(str, token_ids))
+
+    # Remove byte-level marker (often 'Ġ') and normalize whitespace
+    text = text.replace("Ġ", " ")
+    text = " ".join(text.split())
+
+    return text
+
 # --- helpers: levenshtein and postprocess ---
 def levenshtein(a: str, b: str) -> int:
     """Compute Levenshtein edit distance (classic DP)."""
@@ -218,31 +328,106 @@ def levenshtein(a: str, b: str) -> int:
         prev = cur
     return prev[lb]
 
-import re
-def postprocess_latex(s: str) -> str:
-    """Simple cleaning of predicted/gold latex strings for fair comparison."""
+def clean_special_tokens(s: str) -> str:
+    """
+    Remove/normalize explicit special tokens that sometimes survive decoding
+    (e.g., '<s>', '</s>', '[PAD]', '[UNK]') and the byte-level 'Ġ' marker.
+    """
     if s is None:
         return ""
-    s = s.strip()
-    # common cleanups: collapse whitespace
-    s = re.sub(r"\s+", " ", s)
-    # trim stray special tokens often included in HF outputs
-    s = s.replace("<s>", "").replace("</s>", "").strip()
-    # balance braces roughly (append closing braces)
-    opens = s.count("{")
-    closes = s.count("}")
-    if closes < opens:
-        s = s + ("}" * (opens - closes))
+    # Remove obvious special tokens (some tokenizers may produce spaced forms too)
+    # handle both exact forms and spaced variants like '< / s >' defensively.
+    s = s.replace("<s>", "").replace("</s>", "")
+    s = s.replace("[PAD]", "").replace("[UNK]", "")
+    # normalize byte-level marker common in fast tokenizers
+    s = s.replace("Ġ", " ")
     return s
 
-# --- robust evaluate function ---
-def evaluate(model, val_loader, tokenizer, device, num_examples: int = 200, gen_kwargs: dict = None):
+
+def fix_backslash_commands(s: str) -> str:
     """
-    Evaluate model on validation loader.
-    Returns: dict(metrics) and list of example triples (gold, pred, norm_edit)
+    Join split tokens that belong to a LaTeX command name.
+    Examples:
+        '\epsil on' -> '\epsilon'
+        '\z e t a'  -> '\zeta'
+        '\mat h r m' -> '\mathrm' or '\mathbf' depends on original tokens,
+                        this function simply removes spaces between letters
+                        immediately after a backslash.
+    Implementation:
+      - find sequences that start with backslash, followed by letters and spaces,
+        and remove the spaces inside the letter sequence only.
     """
+    if not s:
+        return s
+
+    # callback to strip spaces inside the captured group
+    def _join_letters(m):
+        letters_with_spaces = m.group(1)
+        letters = re.sub(r'\s+', '', letters_with_spaces)
+        return '\\' + letters
+
+    # This looks for '\' followed by at least one letter, then zero-or-more letters/spaces,
+    # but stops at the first non-letter/non-space (so it doesn't eat '{' or digits).
+    return re.sub(r'\\([A-Za-z](?:[A-Za-z\s]*[A-Za-z])?)', _join_letters, s)
+
+
+def postprocess_latex(s: str) -> str:
+    """
+    Clean a LaTeX string for display after tokenizer.decode(...).
+    - Remove tokenizer artifacts (Ġ, special token forms)
+    - Re-join split command names (e.g., '\epsil on' -> '\epsilon')
+    - Remove extraneous spaces inside braces and around ^ / _
+    - Normalize spacing around punctuation
+    NOTE: This is for *display* / evaluation only. It attempts to restore
+    human-readable LaTeX, not to perfectly canonicalize all TeX.
+    """
+    if s is None:
+        return ""
+
+    # 1) remove explicit special tokens / byte markers and normalize whitespace
+    s = clean_special_tokens(s)
+
+    # 2) remove accidental spaces directly after a backslash (e.g., '\ frac' -> '\frac')
+    s = re.sub(r'\\\s+', r'\\', s)
+
+    # 3) re-join multi-token LaTeX command names like '\epsil on' -> '\epsilon'
+    s = fix_backslash_commands(s)
+
+    # 4) tidy braces and superscript/subscript spacing:
+    s = re.sub(r'\s*\{\s*', '{', s)   # ' { '  -> '{'
+    s = re.sub(r'\s*\}\s*', '}', s)   # ' } '  -> '}'
+    s = re.sub(r'\s*\^\s*', '^', s)   # ' ^ '  -> '^'
+    s = re.sub(r'\s*_\s*', '_', s)    # ' _ '  -> '_'
+
+    # 5) tidy common spacing around punctuation in math formulas:
+    #    - remove spaces before commas, ensure single space after comma (not absolute law)
+    s = re.sub(r'\s+,', ',', s)
+    s = re.sub(r',\s*', ', ', s)
+
+    # 6) collapse repeated whitespace
+    s = " ".join(s.split())
+
+    # Final trim
+    return s.strip()
+
+def evaluate(model, val_loader, tokenizer, device, num_examples: int = 200, gen_kwargs: dict = None,
+             max_batches: int = None, debug: bool = False):
+    """
+    Evaluate model on validation loader with some extra instrumentation.
+
+    - gen_kwargs: dict passed to model.generate (default uses small beams for debug).
+    - max_batches: optional early stop after N val batches (useful for debugging).
+    - debug: if True, we use smaller beams by default and print the first pred immediately.
+    """
+
     if gen_kwargs is None:
         gen_kwargs = {"max_length": 200, "num_beams": 3, "early_stopping": True}
+
+    # If debug, make generation cheap by default
+    if debug:
+        gen_kwargs = gen_kwargs.copy()
+        gen_kwargs.setdefault("num_beams", 1)
+        gen_kwargs.setdefault("max_length", 100)
 
     model.eval()
     total = 0
@@ -250,90 +435,96 @@ def evaluate(model, val_loader, tokenizer, device, num_examples: int = 200, gen_
     total_norm = 0.0
     examples = []
 
+    val_batches = len(val_loader) if hasattr(val_loader, "__len__") else None
+    logger.info(f"Starting evaluation on {val_batches if val_batches is not None else '?'} batches "
+                f"(gen_kwargs={gen_kwargs}, max_batches={max_batches}, debug={debug})")
+
+    start_eval = time.time()
+    batch_count = 0
     with torch.no_grad():
-        for batch in val_loader:
-            # Expect batch to contain 'pixel_values' and optionally 'labels'
+        for batch_idx, batch in enumerate(val_loader, start=1):
+            batch_count += 1
+            if max_batches is not None and batch_idx > max_batches:
+                logger.info("Reached max_batches limit (%d). Breaking evaluation early.", max_batches)
+                break
+
             pixel_values = batch.get("pixel_values")
             labels = batch.get("labels", None)
-
             if pixel_values is None:
-                # skip malformed batch
+                logger.warning("Skipping malformed validation batch (no pixel_values).")
                 continue
 
             pixel_values = pixel_values.to(device)
 
-            # generate predictions
+            t0 = time.time()
             try:
                 generated = model.generate(pixel_values=pixel_values, **gen_kwargs)
             except Exception as e:
-                # generation failed for this batch; skip
-                print("Warning: generation failed on a batch:", e)
+                logger.exception("Generation failed for batch %d: %s", batch_idx, e)
                 continue
+            # If using CUDA, optionally synchronize to get accurate timing:
+            if device.type == "cuda":
+                try:
+                    torch.cuda.synchronize(device)
+                except Exception:
+                    pass
+            gen_time = time.time() - t0
 
-            # generated: tensor (batch_size, seq_len)
-            # decode preds robustly
+            # decode preds
             preds = []
             for gen_ids in generated:
                 try:
-                    pred_text = tokenizer.decode(gen_ids.cpu().numpy().tolist(), skip_special_tokens=True)
-                except TypeError:
-                    # older/custom tokenizer
-                    try:
-                        pred_text = tokenizer.decode(gen_ids.cpu().numpy().tolist(), strip_special=True)
-                    except Exception:
-                        # last resort: join token ids
-                        pred_text = " ".join(map(str, gen_ids.cpu().numpy().tolist()))
+                    pred_text = tokenizer.decode(gen_ids.cpu().numpy().tolist(), skip_special_tokens=True, clean_up_tokenization_spaces=True)
+                except Exception:
+                    # fallback
+                    pred_text = " ".join(map(str, gen_ids.cpu().numpy().tolist()))
                 pred_text = postprocess_latex(pred_text)
                 preds.append(pred_text)
 
-            # decode gold texts from labels (handle -100)
+            # decode golds
             golds = []
             if labels is not None:
-                # labels shape: (batch, L)
                 for lab in labels:
                     lab_ids = lab.cpu().numpy().tolist()
-                    # remove mask tokens (-100)
                     lab_ids = [int(x) for x in lab_ids if int(x) != -100]
                     if len(lab_ids) == 0:
                         gold_text = ""
                     else:
-                        # decode robustly
                         try:
-                            gold_text = tokenizer.decode(lab_ids, skip_special_tokens=True)
-                        except TypeError:
-                            try:
-                                gold_text = tokenizer.decode(lab_ids, strip_special=True)
-                            except Exception:
-                                gold_text = ""
+                            gold_text = tokenizer.decode(lab_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+                        except Exception:
+                            gold_text = ""
                     gold_text = postprocess_latex(gold_text)
                     golds.append(gold_text)
             else:
-                # no labels present; use empty golds
                 golds = [""] * len(preds)
+
+            # quick debug print for the first batch (so we can see an example ASAP)
+            if debug and batch_idx == 1:
+                if len(golds) > 0 and len(preds) > 0:
+                    logger.info("DEBUG-EXAMPLE (batch 1): gold=%s", golds[0])
+                    logger.info("DEBUG-EXAMPLE (batch 1): pred=%s", preds[0])
 
             # Now compare pairwise
             for pred_text, gold_text in zip(preds, golds):
-                # ensure both defined
-                if gold_text is None:
-                    gold_text = ""
-                if pred_text is None:
-                    pred_text = ""
-
                 total += 1
                 if pred_text == gold_text:
                     exact_matches += 1
 
-                # compute normalized edit distance
                 dist = levenshtein(pred_text, gold_text)
                 denom = max(1, max(len(pred_text), len(gold_text)))
                 norm = dist / denom
                 total_norm += norm
 
-                # save some examples
                 if len(examples) < num_examples:
                     examples.append((gold_text, pred_text, norm))
 
-    # avoid division by zero
+            if batch_idx % 5 == 0:
+                logger.info("Eval progress: batch %d, gen_time %.3fs, total_examples %d", batch_idx, gen_time, total)
+
+    elapsed = time.time() - start_eval
+    logger.info("Evaluation complete: batches=%d, time=%.1fs", batch_count, elapsed)
+
     if total == 0:
         return {"exact_match": 0.0, "norm_edit": float("inf"), "examples": examples}
 
@@ -516,8 +707,10 @@ def main():
             val_loader,
             tokenizer,
             device,
-            num_examples=200,
-            gen_kwargs={"max_length": 200, "num_beams": 3},
+            num_examples=20,    # smaller for faster runs
+            gen_kwargs={"max_length": 200, "num_beams": 3, "early_stopping": False},
+            max_batches=50,     # evaluate only first 50 val batches (or None)
+            debug=False,
         )
         logger.info(
             f"Epoch {epoch} eval: exact_match={metrics['exact_match']:.4f}, "
