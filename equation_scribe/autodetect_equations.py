@@ -1,4 +1,17 @@
 # equation_scribe/autodetect_equations.py
+"""
+Record schema written to equations.jsonl (one JSON object per line):
+{
+    "uid": "<unique-id>",
+    "paper_id": "<paper-id>",
+    "page_index": <int>,
+    "bbox_pdf": [x0, y0, x1, y1],  # PDF point coords
+    "bbox_px": [x0, y0, x1, y1],   # pixel coords of rendered page (if available)
+    "latex": "<latex string>" or null,
+    "confidence": <float>,
+    "symbols": { ... }  # optional glossary mapping
+}
+"""
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +21,7 @@ from .pdf_ingest import load_pdf, page_size_points, page_layout_with_ocr
 from .detect import find_equation_candidates
 from .store import canonical_hash
 
-# NOTE: we intentionally do not save per-record inside the loop anymore.
+# NOTE: we intentionally do not save per-record inside the loop.
 # Instead we collect all_records and write the JSONL once at the end,
 # so we can protect existing files and register atomically.
 

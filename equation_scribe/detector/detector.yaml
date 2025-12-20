@@ -1,8 +1,9 @@
 # equation_scribe/detector/detector.yaml
 # path: detector/data
 path: C:/Data/repos/equation_scribe/detector/data
-train: images/tiles_train
-val: images/tiles_val
-nc: 2
-names: ['equation', 'inline']   # or ['display','inline'] based on your categories
+train: train/images
+val: val/images
+nc: 1
+names:
+  0: equation
 

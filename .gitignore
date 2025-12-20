@@ -11,6 +11,7 @@ runs/
 .env
 *.csv
 *.tsv
+*.lst
 
 __pycache__/
 *.log

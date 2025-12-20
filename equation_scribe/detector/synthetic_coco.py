@@ -30,17 +30,24 @@ import math
 import os
 import random
 import tempfile
+import csv
+import re
 from pathlib import Path
 from typing import List, Tuple, Optional
 import shutil
 from PIL import Image
 import numpy as np
 import logging
+import random
+from PIL import ImageDraw, ImageFont
 from equation_scribe.config import (
     MAX_EQ_WIDTH_FRAC, MAX_EQ_HEIGHT_FRAC,
     NON_OVERLAP_IOU, MAX_PLACEMENT_ATTEMPTS, ROTATION_AUG_MAX_ANGLE,
     DEFAULT_DPI,PAGE_WIDTH_IN,PAGE_HEIGHT_IN
 )
+
+# A small corpus of "science-y" words to generate fake paragraphs
+VOCAB = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur excepteur sint occaecat cupidatat non proident sunt in culpa qui officia deserunt mollit anim id est laborum analysis data system model performance network neural learning algorithm distribution probability vector matrix function linear optimal".split()
 
 # Try to import the repository's render_latex helper (preferred).
 # This function should accept (expr: str, out_path: str, dpi: int, prefer_latex: bool)
@@ -82,7 +89,7 @@ if _render_mathtext is None:
 
     def render_mathtext(expr: str, out_path: str, dpi: int = 150, prefer_latex: bool = False):
         # prefer_latex is ignored in the fallback
-        return _matplotlib_render(expr, out_path, dpi=dpi, fontsize=22)
+        return _matplotlib_render(expr, out_path, dpi=dpi, fontsize=10)
 
     _render_mathtext = render_mathtext  # type: ignore
 
@@ -101,6 +108,138 @@ SAMPLE_EQUATIONS = [
     r"\phi(x) = \int K(x,y) f(y) dy",
     r"\lim_{x \to 0} \frac{\sin x}{x} = 1",
 ]
+
+
+def clean_latex_formula(tex: str) -> str:
+    """
+    Sanitizes raw LaTeX using robust logic from validate_linear.py.
+    1. Strips comments (handling escaped \% vs \\% correctly).
+    2. Strips labels recursively (replacing them with a space).
+    """
+    if not tex: return ""
+
+    # --- 1. Strip Comments (Robust Backslash Counting) ---
+    try:
+        idx = 0
+        while True:
+            # Find next '%'
+            idx = tex.index("%", idx)
+            
+            # Count backslashes immediately preceding it
+            backslashes = 0
+            i = idx - 1
+            while i >= 0 and tex[i] == "\\":
+                backslashes += 1
+                i -= 1
+            
+            # Even number of backslashes means the % is NOT escaped -> It's a comment
+            if backslashes % 2 == 0:
+                tex = tex[:idx]
+                break
+            else:
+                # Odd number means it's escaped (\%), keep searching
+                idx += 1
+    except ValueError:
+        pass # No % found, move on
+
+    # --- 2. Strip Labels (Recursive Brace Counting) ---
+    while True:
+        # Find start of \label{ (allowing for optional spaces)
+        match = re.search(r"\\label\s*\{", tex)
+        if not match:
+            break
+            
+        start_idx = match.start()
+        open_brace_idx = match.end() - 1
+        
+        # Walk forward to find the matching closing brace
+        depth = 1
+        end_idx = -1
+        for i in range(open_brace_idx + 1, len(tex)):
+            if tex[i] == '{':
+                depth += 1
+            elif tex[i] == '}':
+                depth -= 1
+            
+            if depth == 0:
+                end_idx = i
+                break
+        
+        if end_idx != -1:
+            # Replace with a space to prevent token merging
+            tex = tex[:start_idx] + " " + tex[end_idx+1:]
+        else:
+            # Malformed label. Stop to prevent infinite loop.
+            break
+
+    return tex.strip()
+
+def draw_fake_ieee_text(page_img: Image.Image, dpi: int = 150, margin_px: int = 50, col_gap_px: int = 30):
+    """
+    Draws random text in a two-column layout onto the page_img to simulate an IEEE paper.
+    """
+    draw = ImageDraw.Draw(page_img)
+    w, h = page_img.size
+    
+    # Define columns
+    col_width = (w - (2 * margin_px) - col_gap_px) // 2
+    cols = [
+        (margin_px, margin_px, margin_px + col_width, h - margin_px), # Left Col
+        (margin_px + col_width + col_gap_px, margin_px, w - margin_px, h - margin_px) # Right Col
+    ]
+    # Calculate pixel size for 10pt font at this DPI
+    # IEEE standard is ~10pt for body, ~12-14pt for headers
+    body_pt = 10
+    header_pt = 12
+    
+    body_px = int(body_pt * (dpi / 72.0))
+    header_px = int(header_pt * (dpi / 72.0))
+    
+    try:
+        # Load font with calculated pixel size
+        font = ImageFont.truetype("arial.ttf", body_px) 
+        header_font = ImageFont.truetype("arial.ttf", header_px)
+    except IOError:
+        # Fallback (size might be off, but it prevents crash)
+        font = ImageFont.load_default()
+        header_font = font
+
+    for (x0, y0, x1, y1) in cols:
+        cursor_y = y0
+        while cursor_y < y1:
+            # Randomly decide if this is a header or paragraph
+            is_header = random.random() < 0.1
+            current_font = header_font if is_header else font
+            
+            # Generate a random sentence
+            num_words = random.randint(3, 10) if is_header else random.randint(20, 100)
+            text = " ".join(random.choices(VOCAB, k=num_words)).capitalize()
+            
+            # Simple text wrapping logic
+            words = text.split()
+            line = ""
+            for word in words:
+                test_line = line + word + " "
+                # Check width
+                bbox = draw.textbbox((0,0), test_line, font=current_font)
+                text_w = bbox[2] - bbox[0]
+                
+                if text_w < (col_width - 10):
+                    line = test_line
+                else:
+                    draw.text((x0, cursor_y), line, fill="black", font=current_font)
+                    line = word + " "
+                    cursor_y += 14 if is_header else 12 # Line height
+                    
+                    if cursor_y > y1: break
+            
+            # Draw last line
+            if cursor_y < y1:
+                draw.text((x0, cursor_y), line, fill="black", font=current_font)
+                cursor_y += 20 if is_header else 12
+            
+            # Add paragraph spacing
+            cursor_y += random.randint(5, 15)
 
 ################################################################################
 # stricter placement: try to place boxes with no overlap, optionally fail early
@@ -407,7 +546,8 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
                             n_papers: int = 5,
                             eqs_per_page: int = 4,
                             dpi: int = DEFAULT_DPI,
-                            seed: int = 0,):
+                            seed: int = 0,
+                            formulas_file: Optional[Path] = None,):
     """
     Generate synthetic pages and COCO annotations.
 
@@ -452,6 +592,41 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
     paper_idx = 0
     page_global_idx = 0
 
+    # 1. LOAD FORMULAS
+    # all_formulas = SAMPLE_EQUATIONS # Fallback
+    
+    if formulas_file and Path(formulas_file).exists():
+        p_formulas = Path(formulas_file)
+        print(f"Loading formulas from {p_formulas}...")
+        
+        # Robust Open: Try UTF-8 first, fallback to Latin-1 (common in older datasets)
+        try:
+            with open(p_formulas, "r", encoding="utf-8") as f:
+                raw_lines = f.readlines()
+        except UnicodeDecodeError:
+            print("UTF-8 failed, trying latin-1...")
+            with open(p_formulas, "r", encoding="latin-1") as f:
+                raw_lines = f.readlines()
+
+        all_formulas = []
+        if p_formulas.suffix.lower() == ".csv":
+            # Keep legacy CSV support
+            import csv
+            reader = csv.reader(raw_lines)
+            for row in reader:
+                if row:
+                    clean = clean_latex_formula(row[0])
+                    if len(clean) > 5:
+                        all_formulas.append(clean)
+        else:
+            # LST Mode: Apply robust cleaner
+            for line in raw_lines:
+                clean = clean_latex_formula(line.strip())
+                if len(clean) > 5:
+                    all_formulas.append(clean)
+                
+        print(f"Loaded {len(all_formulas)} clean formulas.")
+
     for paper_idx in range(n_papers):
         pages_for_this = pages_per_paper[paper_idx]
         for page_idx in range(pages_for_this):
@@ -462,10 +637,15 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
             page_img = make_blank_page(PAGE_W, PAGE_H)
             # Generate eq image sizes by rendering each equation first to a temp file,
             # then measure size and paste onto the page.
-            eq_exprs = [random.choice(SAMPLE_EQUATIONS) for _ in range(eqs_per_page)]
+            # 2. NEW: Draw the IEEE-style text first
+            draw_fake_ieee_text(page_img, dpi=dpi) 
+            
+            # Select random formulas
+            eq_exprs = [random.choice(all_formulas) for _ in range(eqs_per_page)]
             eq_images = []
             eq_sizes = []
             for expr in eq_exprs:
+                 # print(expr)
                 # Render using repository's renderer (or fallback)
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpf:
                     tmpname = tmpf.name
@@ -476,6 +656,13 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
                     eq_img.load()
                     # Convert to RGBA for rotation/compositing convenience
                     eq_img = eq_img.convert("RGBA")
+                    # --- NEW: Hard correction for size mismatch ---
+                    # If equations are 2-3x too big, scale them down here.
+                    # 0.5 is a good starting point if they are "double size".
+                    # scale_correction = 0.5 
+                    # new_w = max(1, int(eq_img.width * scale_correction))
+                    # new_h = max(1, int(eq_img.height * scale_correction))
+                    # eq_img = eq_img.resize((new_w, new_h), Image.LANCZOS)
                 except Exception:
                     # Fallback: draw a small placeholder box with the expression text
                     eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
@@ -499,7 +686,7 @@ def generate_synthetic_coco(out_images: Path, out_anns: Path,
                     eq_img = Image.new("RGBA", (int(dpi * 0.5), int(dpi * 0.2)), (200, 200, 200, 255))
 
                 # Ensure a reasonable size - enforce max width/height relative to page
-                max_w = int(PAGE_W * 0.6)
+                max_w = int(PAGE_W * 0.9)
                 max_h = int(PAGE_H * 0.25)
                 w, h = eq_img.size
                 if w > max_w or h > max_h:
@@ -597,6 +784,8 @@ def parse_args():
     p.add_argument("--emit-recognition-jsonl", action="store_true", help="Emit recognition JSONL/crops after generating COCO")
     p.add_argument("--recog-pad", type=int, default=4, help="Padding in px for recognition crop")
     p.add_argument("--recog-deskew", action="store_true", help="Attempt to deskew recognition crops")
+    p.add_argument("--formulas-file", type=str, default=None, 
+                   help="Path to a text file (.lst) or CSV (.csv) containing LaTeX formulas.")
 
 
     return p.parse_args()
@@ -618,4 +807,5 @@ if __name__ == "__main__":
         eqs_per_page=args.eqs_per_page,
         dpi=args.dpi,
         seed=args.seed,
+        formulas_file=args.formulas_file,
     )

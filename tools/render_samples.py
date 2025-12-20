@@ -11,7 +11,7 @@ try:
 except ImportError:
     # Fallback if running directly inside detector/ directory
     sys.path.append(str(Path(__file__).parent))
-    from render_latex import render_mathtext
+    from equation_scribe.detector.render_latex import render_mathtext
 
 SAMPLE_EQUATIONS = [
     r"E = mc^2",
