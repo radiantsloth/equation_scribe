@@ -6,16 +6,30 @@ import json
 from PIL import Image
 
 def detect_image(model_path, image_path, conf_thresh=0.25, iou=0.5):
+    """
+    Run object detection on an image using Ultralytics YOLO model.
+
+    Args:
+        model_path: path to a YOLO model weights or a loaded model instance.
+        image_path: Path to the image to detect.
+        conf_thresh: confidence threshold to filter detections.
+        iou: IoU threshold for NMS.
+        max_det: maximum number of detections to return.
+
+    Returns:
+        List[dict] where each dict contains keys:
+            - 'xyxy': [x1,y1,x2,y2] (pixel coordinates)
+            - 'conf': float
+            - 'cls': int
+    Notes:
+        - This function ensures tensors are moved to CPU and converted to numpy
+          before returning to avoid device-specific types in JSON serialization.
+    """
     model = YOLO(model_path)
     results = model.predict(source=str(image_path), conf=conf_thresh, iou=iou, max_det=300)
     r = results[0]
     boxes = []
     if hasattr(r, "boxes"):
-        # for box in r.boxes:
-        #     xyxy = box.xyxy[0].numpy().tolist()  # [x1,y1,x2,y2]
-        #     conf = float(box.conf[0])
-        #     clsid = int(box.cls[0])
-        #     boxes.append({"xyxy": xyxy, "conf": conf, "cls": clsid})
         for box in r.boxes:
             # move tensors to CPU before converting to numpy/list
             xyxy = box.xyxy[0].cpu().numpy().tolist()  # [x1,y1,x2,y2]

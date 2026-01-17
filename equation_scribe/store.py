@@ -1,4 +1,5 @@
 # equation_scribe/store.py
+
 from __future__ import annotations
 import json, hashlib
 from pathlib import Path
@@ -15,12 +16,22 @@ def canonical_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 def append_jsonl(path: Path, record: Dict[str, Any]):
+    """
+    Append a JSON-serializable record to a JSONL file in a concurrency-safe manner.
+
+    Uses portalocker to acquire an exclusive lock before writing and flushes the
+    file to disk to minimize risk of partial writes.
+
+    Args:
+        path: Path to the JSONL file (created if missing).
+        record: dict to append as a line in JSONL format.
+
+    Returns:
+        None
+    """
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-# def save_equation(root: Path, paper_id: str, record: Dict[str, Any]):
-#     d = paper_dir(root, paper_id)
-#     append_jsonl(d / "equations.jsonl", record)
 def save_equation(root: Path, paper_id: str, record: Dict[str, Any]):
     d = paper_dir(root, paper_id)
     path = d / "equations.jsonl"

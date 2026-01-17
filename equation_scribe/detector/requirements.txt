@@ -9,3 +9,5 @@ pillow
 tqdm
 numpy
 pytest
+torch
+pix2tex

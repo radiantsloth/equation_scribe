@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
 """
 render_latex.py — render LaTeX math to PNG.
-
-Approach:
-  1. Prefer pdflatex + standalone package for complex LaTeX environments (matrix,
-     arrays, multi-line constructs). Use pdf2image/poppler to rasterize.
-  2. Fall back to matplotlib.mathtext rendering for simpler expressions.
-
-Requirements:
-  - pdflatex (MiKTeX or TeX Live) for full LaTeX rendering
-  - poppler (pdftoppm) and pdf2image (optional) to convert PDF to PNG
-  - matplotlib for fallback rendering
-
-API:
-  - render_mathtext(expr, out_path, dpi=150, prefer_latex=True) -> None
 """
 
 import os
@@ -28,7 +15,9 @@ import logging
 # matplotlib path
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+# CHANGE: Use Figure directly to avoid global state memory leaks
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from PIL import Image
 
 # pdf2image optional
@@ -43,173 +32,147 @@ logger.setLevel(logging.INFO)
 ch = logging.StreamHandler()
 logger.addHandler(ch)
 
+# --- 1. ROBUST PREAMBLE ---
+TEX_TEMPLATE = r"""
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{bm}
+\usepackage{mathrsfs}
+\usepackage{color}
 
-def _matplotlib_render(expr: str, out_path: str, dpi: int = 200, fontsize: int = 28):
-    """Render the expression with matplotlib mathtext (fast, but limited)."""
-    fig = plt.figure(figsize=(3, 1))
-    # place in figure center
-    plt.text(0.5, 0.5, f"${expr}$", fontsize=fontsize, ha="center", va="center")
-    plt.axis("off")
-    # save to a temporary file and then re-open to ensure RGB
-    tmp = out_path + ".tmp.png"
-    fig.savefig(tmp, dpi=dpi, bbox_inches="tight", pad_inches=0.05)
-    plt.close(fig)
-    # convert to RGB to normalize format
-    Image.open(tmp).convert("RGB").save(out_path)
-    try:
-        os.remove(tmp)
-    except Exception:
-        pass
-    return out_path
+%% COMPATIBILITY HACKS for im2latex %%
+\makeatletter
+\renewcommand{\pmatrix}[1]{\left(\begin{matrix}#1\end{matrix}\right)}
+\renewcommand{\matrix}[1]{\begin{matrix}#1\end{matrix}}
+\renewcommand{\cases}[1]{\begin{cases}#1\end{cases}}
+\makeatother
 
-
-def _latex_render(expr: str, out_path: str, dpi: int = 300, packages=None):
-    """
-    Render expression using pdflatex -> pdf -> png.
-
-    Uses the standalone documentclass (tight bounding) and ensures the expression
-    is placed inside math mode when appropriate (especially for \begin{...}).
-    """
-    if shutil.which("pdflatex") is None:
-        raise RuntimeError("pdflatex not found on PATH. Please install TeX (MiKTeX or TeX Live).")
-
-    if not HAVE_PDF2IMAGE:
-        raise RuntimeError("pdf2image not installed; needed to convert PDF -> PNG. `pip install pdf2image` and install poppler.")
-
-    packages = packages or ["amsmath", "amssymb", "amsfonts", "bm"]
-
-    s = expr.strip()
-
-    # Decide whether this needs display-math wrapping.
-    # If it contains a LaTeX environment (\begin{...}) or multiline content, use display math.
-    needs_display_math = False
-    if "\\begin" in s or "\\cases" in s or "\\align" in s or "\n" in s:
-        needs_display_math = True
-
-    # Detect if expression already explicitly uses math delimiters ($, \(, \[, or display environments).
-    already_math = False
-    if s.startswith("$") or s.startswith("\\(") or s.startswith("\\["):
-        already_math = True
-    # Note: do NOT treat "\begin{" as already math — we want to wrap that case.
-
-    # Construct the math block to place inside the standalone document.
-    if needs_display_math and not already_math:
-        math_block = "\\[\n" + expr + "\n\\]"
-    elif not needs_display_math and not already_math:
-        # Use inline math for short expressions
-        math_block = "\\(" + expr + "\\)"
-    else:
-        # Already has math delimiters or is intentionally a LaTeX fragment
-        math_block = expr
-
-    tex = r"""\documentclass[varwidth=true, border=2pt]{standalone}
-\usepackage{%s}
+\pagestyle{empty}
 \begin{document}
 %s
 \end{document}
-""" % (",".join(packages), math_block)
+"""
 
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        tex_file = td / "eq.tex"
-        tex_file.write_text(tex, encoding="utf-8")
+OUTER_ENVS = {
+    "equation", "equation*", "align", "align*", "gather", "gather*", 
+    "multline", "multline*", "eqnarray", "eqnarray*", "flalign", "flalign*"
+}
 
-        # run pdflatex
-        cmd = ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "-output-directory", str(td), str(tex_file)]
-        try:
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError as e:
-            # capture log
-            log = (td / "eq.log").read_text(errors="ignore") if (td / "eq.log").exists() else ""
-            raise RuntimeError(f"pdflatex failed: {e}\nlog:\n{log}") from e
+def _latex_render(latex, out_path, dpi=150):
+    """
+    Renders LaTeX to an image using pdflatex + pdftoppm.
+    """
+    if not HAVE_PDF2IMAGE:
+        raise RuntimeError("pdf2image module not found.")
 
-        pdf_file = td / "eq.pdf"
-        if not pdf_file.exists():
-            raise RuntimeError("pdflatex did not produce eq.pdf")
+    stripped = latex.strip()
+    should_wrap = True
+    
+    # Smart Wrapping
+    if stripped.startswith(r"\begin"):
+        import re
+        m = re.match(r"\\begin\s*\{([^\}]+)\}", stripped)
+        if m and m.group(1) in OUTER_ENVS:
+            should_wrap = False
+    
+    if should_wrap:
+        content = f"\\[ {latex} \\]"
+    else:
+        content = latex
 
-        # convert to PNG using pdf2image
+    # Prepare .tex file
+    tex_source = TEX_TEMPLATE % content
+    out_path = Path(out_path).resolve()
+    work_dir = out_path.parent
+    job_name = out_path.stem
+    tex_file = work_dir / f"{job_name}.tex"
+    
+    with open(tex_file, "w", encoding="utf-8") as f:
+        f.write(tex_source)
+    
+    # Run pdflatex with INCREASED TIMEOUT
+    cmd = ["pdflatex", "-interaction=nonstopmode", f"-output-directory={work_dir}", str(tex_file)]
+    
+    try:
+        subprocess.run(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            check=True, 
+            timeout=30
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        # Capture the log for debugging
+        log_file = work_dir / f"{job_name}.log"
+        error_details = str(e)
+        if log_file.exists():
+            with open(log_file, "r", encoding="latin-1", errors="ignore") as lf:
+                log_content = lf.read()
+                # extract lines starting with !
+                errors = [line for line in log_content.splitlines() if line.startswith("!")]
+                if errors:
+                    error_details += f"\nLaTeX Error Log: {errors[:3]}"
+
+        # Cleanup and raise
+        if tex_file.exists(): os.unlink(tex_file)
+        raise RuntimeError(f"LaTeX render failed: {error_details}")
+
+    pdf_file = work_dir / f"{job_name}.pdf"
+    if not pdf_file.exists():
+        raise RuntimeError("pdflatex did not produce PDF output.")
+
+    # convert to PNG using pdf2image
+    try:
         pages = convert_from_path(str(pdf_file), dpi=dpi, fmt="png")
         if len(pages) == 0:
             raise RuntimeError("pdf2image did not return any pages")
         pages[0].convert("RGB").save(out_path)
+    finally:
+        # Cleanup artifacts
+        for ext in [".aux", ".log", ".tex", ".pdf"]:
+            f = work_dir / f"{job_name}{ext}"
+            if f.exists():
+                try: os.unlink(f)
+                except: pass
+                
     return out_path
 
-
-
-
-def render_mathtext(expr: str, out_path: str, dpi: int = 200, fontsize: int = 28, prefer_latex: bool = False):
+def _matplotlib_render(expr: str, out_path: str, dpi: int = 150, fontsize: int = 20):
     """
-    Render a TeX math expression to an image file at `out_path`.
-
-    Args:
-        expr: LaTeX expression (may include environments such as \\begin{pmatrix} ... \\end{pmatrix}).
-        out_path: path to write the PNG result.
-        dpi: rasterization DPI.
-        prefer_latex: if True, try pdflatex first; otherwise use matplotlib fallback.
-
-    Raises:
-        RuntimeError: if both pdflatex and matplotlib rendering fail.
+    Fallback renderer: uses matplotlib mathtext.
+    Uses Object-Oriented API (Figure) to avoid global state memory leaks.
     """
-    out_path = str(out_path)
-    # heuristics: if expression contains a LaTeX environment, or multi-line constructs, use pdflatex
-    needs_full_latex = "\\begin" in expr or "\\matrix" in expr or "\\begin{" in expr or "\n" in expr or "\\displaystyle" in expr or "\\cases" in expr or "\\align" in expr
+    tex = expr
+    if not (tex.startswith("$") and tex.endswith("$")):
+        tex = f"${tex}$"
 
-    if prefer_latex or needs_full_latex:
+    # CHANGE: Use Figure() directly instead of plt.figure()
+    # This prevents the "More than 20 figures have been opened" warning
+    # because these figures are never registered with the pyplot state machine.
+    fig = Figure(figsize=(0.01, 0.01))
+    FigureCanvasAgg(fig) # Attach a canvas so we can save
+    
+    fig.text(0.0, 0.0, tex, fontsize=fontsize)
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", pad_inches=0.02)
+    # No plt.close(fig) needed because we never opened it in pyplot!
+
+def render_mathtext(expr, out_path, dpi=150, prefer_latex=False):
+    # 1. Try LaTeX
+    if prefer_latex and HAVE_PDF2IMAGE:
         try:
-            return _latex_render(expr, out_path, dpi=max(dpi, 300))
+            _latex_render(expr, out_path, dpi=dpi)
+            return
         except Exception as e:
-            logger.warning("LaTeX render failed (%s); falling back to matplotlib if possible. Error: %s", type(e).__name__, e)
-            # fall back to matplotlib below
+            # print(f"pdflatex failed: {e}")
+            pass
 
-    # Try matplotlib route
+    # 2. Fallback to Matplotlib
     try:
-        return _matplotlib_render(expr, out_path, dpi=dpi, fontsize=fontsize)
+        _matplotlib_render(expr, out_path, dpi=dpi)
     except Exception as e:
-        # If matplotlib can't render and pdflatex is available, try latex route
-        logger.warning("Matplotlib mathtext failed (%s). Trying full LaTeX if available. Error: %s", type(e).__name__, e)
-        if shutil.which("pdflatex") and HAVE_PDF2IMAGE:
-            return _latex_render(expr, out_path, dpi=max(dpi, 300))
-        else:
-            raise
-
-
-# small demo: create a synthetic page by pasting multiple rendered expressions
-def make_synthetic_page(out_dir, page_name="page_0001.png", n_eq=5, dpi=150):
-    from PIL import Image, ImageDraw
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    page_width, page_height = 1240, 1754  # A4-ish at medium DPI
-    bg = Image.new("RGB", (page_width, page_height), "white")
-    for i in range(n_eq):
-        if i % 2 == 0:
-            expr = r"\nabla \cdot \mathbf{E} = \rho / \varepsilon_0"
-            prefer_latex = False
-        else:
-            # correct matrix expression (single backslashes for LaTeX row separator)
-            expr = r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}"
-            prefer_latex = True
-        tmp = out_dir / f"tmp_eq_{i}.png"
-        render_mathtext(expr, str(tmp), dpi=dpi, prefer_latex=prefer_latex)
-        eq = Image.open(tmp)
-        # random paste location
-        import random
-        maxx = page_width - eq.width - 50
-        maxy = page_height - eq.height - 50
-        x = random.randint(50, max(50, maxx))
-        y = random.randint(50, max(50, maxy))
-        bg.paste(eq, (x, y))
-    out_path = out_dir / page_name
-    bg.save(out_path)
-    return out_path
-
-
-if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--out-dir", default="detector/data/images/synth", help="Output directory")
-    p.add_argument("--n", default=20, type=int, help="Number of synthetic pages")
-    args = p.parse_args()
-    os.makedirs(args.out_dir, exist_ok=True)
-    for i in range(args.n):
-        name = f"page_{i:04d}.png"
-        make_synthetic_page(args.out_dir, page_name=name)
-    print("Generated synthetic pages in", args.out_dir)
+        # If both fail, raise a clear error
+        raise RuntimeError(f"Both renderers failed for: {expr[:30]}...")

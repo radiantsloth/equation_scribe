@@ -1,4 +1,21 @@
 # equation_scribe/profile_index.py
+"""
+profile_index.py — manage a central index.json mapping PDFs to profile directories.
+
+This module uses portalocker to ensure safe concurrent reads/writes. The index
+structure is:
+
+{
+  "version": 1,
+  "papers": {
+     "<paper_id>": {"profiles_dir": "...", "pdf_basename": "...", "num_equations": ...}
+  },
+  "by_pdf_basename": {
+     "<pdf_basename>": "<paper_id>"
+  }
+}
+"""
+
 import json
 import portalocker
 import os
