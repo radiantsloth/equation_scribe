@@ -1,6 +1,6 @@
 # equation_scribe/detector/detector.yaml
 # path: detector/data
-path: C:/Data/repos/equation_scribe/detector/data
+path: C:/Data/repos/equation_scribe/equation_scribe/detector/data
 train: train/images
 val: val/images
 nc: 1

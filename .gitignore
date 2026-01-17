@@ -12,9 +12,12 @@ runs/
 *.csv
 *.tsv
 *.lst
+*.tex
+*.txt
 
 __pycache__/
 *.log
 *.bak
+*.pyc
 args.yaml
 ultralytics_check_output.txt

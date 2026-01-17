@@ -1,26 +1,12 @@
 #!/usr/bin/env python3
 """
 render_latex.py — render LaTeX math to PNG.
-
-Approach:
-  1. Prefer pdflatex + standalone package for complex LaTeX environments (matrix,
-     arrays, multi-line constructs). Use pdf2image/poppler to rasterize.
-  2. Fall back to matplotlib.mathtext rendering for simpler expressions.
-
-Requirements:
-  - pdflatex (MiKTeX or TeX Live) for full LaTeX rendering
-  - poppler (pdftoppm) and pdf2image (optional) to convert PDF to PNG
-  - matplotlib for fallback rendering
-
-API:
-  - render_mathtext(expr, out_path, dpi=150, prefer_latex=True) -> None
 """
 
 import os
 import shutil
 import subprocess
 import tempfile
-import re
 from pathlib import Path
 import argparse
 import sys
@@ -29,7 +15,9 @@ import logging
 # matplotlib path
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+# CHANGE: Use Figure directly to avoid global state memory leaks
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from PIL import Image
 
 # pdf2image optional
@@ -45,25 +33,23 @@ ch = logging.StreamHandler()
 logger.addHandler(ch)
 
 # --- 1. ROBUST PREAMBLE ---
-# Includes packages and hacks for im2latex compatibility
 TEX_TEMPLATE = r"""
-\documentclass{article}
+\documentclass[12pt]{article}
 \usepackage[utf8]{inputenc}
-# \usepackage{amsmath}
-# \usepackage{amsthm}
-# \usepackage{amssymb}
-# \usepackage{amsfonts}
-# \usepackage{bm}
-# \usepackage{mathrsfs}
-# \usepackage{color}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{bm}
+\usepackage{mathrsfs}
+\usepackage{color}
 
-# %% COMPATIBILITY HACKS for im2latex %%
-# \makeatletter
-# \renewcommand{\pmatrix}[1]{\left(\begin{matrix}#1\end{matrix}\right)}
-# \renewcommand{\matrix}[1]{\begin{matrix}#1\end{matrix}}
-# % \cases usually works, but this ensures it maps to standard amsmath
-# \renewcommand{\cases}[1]{\begin{cases}#1\end{cases}}
-# \makeatother
+%% COMPATIBILITY HACKS for im2latex %%
+\makeatletter
+\renewcommand{\pmatrix}[1]{\left(\begin{matrix}#1\end{matrix}\right)}
+\renewcommand{\matrix}[1]{\begin{matrix}#1\end{matrix}}
+\renewcommand{\cases}[1]{\begin{cases}#1\end{cases}}
+\makeatother
 
 \pagestyle{empty}
 \begin{document}
@@ -71,35 +57,24 @@ TEX_TEMPLATE = r"""
 \end{document}
 """
 
-# Environments that already provide math mode (don't wrap these in \[ \])
 OUTER_ENVS = {
     "equation", "equation*", "align", "align*", "gather", "gather*", 
     "multline", "multline*", "eqnarray", "eqnarray*", "flalign", "flalign*"
 }
 
-def _cleanup(work_dir, job_name):
-    """Removes temporary LaTeX artifacts."""
-    for ext in [".aux", ".log", ".tex", ".pdf"]:
-        f = work_dir / f"{job_name}{ext}"
-        if f.exists():
-            try:
-                os.unlink(f)
-            except OSError:
-                pass
-
-def _latex_render(latex: str, out_path: str, dpi: int = 150):
+def _latex_render(latex, out_path, dpi=150):
     """
-    Renders LaTeX to an image file using pdflatex and pdf2image.
+    Renders LaTeX to an image using pdflatex + pdftoppm.
     """
     if not HAVE_PDF2IMAGE:
-        raise RuntimeError("pdf2image module not found. Please install it to render LaTeX.")
+        raise RuntimeError("pdf2image module not found.")
 
-    # --- 2. SMART WRAPPING LOGIC ---
     stripped = latex.strip()
     should_wrap = True
     
-    # Check if the formula starts with a known Outer Environment
+    # Smart Wrapping
     if stripped.startswith(r"\begin"):
+        import re
         m = re.match(r"\\begin\s*\{([^\}]+)\}", stripped)
         if m and m.group(1) in OUTER_ENVS:
             should_wrap = False
@@ -109,89 +84,95 @@ def _latex_render(latex: str, out_path: str, dpi: int = 150):
     else:
         content = latex
 
-    # Prepare file paths
+    # Prepare .tex file
+    tex_source = TEX_TEMPLATE % content
     out_path = Path(out_path).resolve()
     work_dir = out_path.parent
     job_name = out_path.stem
     tex_file = work_dir / f"{job_name}.tex"
-    pdf_file = work_dir / f"{job_name}.pdf"
     
-    # Write .tex file
     with open(tex_file, "w", encoding="utf-8") as f:
-        f.write(TEX_TEMPLATE % content)
+        f.write(tex_source)
     
-    # Run pdflatex
-    # -interaction=nonstopmode ensures it doesn't pause for user input on error
+    # Run pdflatex with INCREASED TIMEOUT
     cmd = ["pdflatex", "-interaction=nonstopmode", f"-output-directory={work_dir}", str(tex_file)]
     
     try:
-        # --- 3. TIMEOUT ADDED (10s) ---
         subprocess.run(
             cmd, 
             stdout=subprocess.PIPE, 
             stderr=subprocess.PIPE, 
             check=True, 
-            timeout=10
+            timeout=30
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        _cleanup(work_dir, job_name)
-        raise RuntimeError(f"LaTeX render failed or timed out: {e}")
+        # Capture the log for debugging
+        log_file = work_dir / f"{job_name}.log"
+        error_details = str(e)
+        if log_file.exists():
+            with open(log_file, "r", encoding="latin-1", errors="ignore") as lf:
+                log_content = lf.read()
+                # extract lines starting with !
+                errors = [line for line in log_content.splitlines() if line.startswith("!")]
+                if errors:
+                    error_details += f"\nLaTeX Error Log: {errors[:3]}"
 
-    # Convert generated PDF to PNG
+        # Cleanup and raise
+        if tex_file.exists(): os.unlink(tex_file)
+        raise RuntimeError(f"LaTeX render failed: {error_details}")
+
+    pdf_file = work_dir / f"{job_name}.pdf"
+    if not pdf_file.exists():
+        raise RuntimeError("pdflatex did not produce PDF output.")
+
+    # convert to PNG using pdf2image
     try:
-        images = convert_from_path(str(pdf_file), dpi=dpi)
-        if images:
-            # Save the first page (formulas are usually single page)
-            images[0].save(out_path)
-        else:
-            raise RuntimeError("PDF generated but contained no pages.")
-    except Exception as e:
-        _cleanup(work_dir, job_name)
-        raise RuntimeError(f"Image conversion failed: {e}")
+        pages = convert_from_path(str(pdf_file), dpi=dpi, fmt="png")
+        if len(pages) == 0:
+            raise RuntimeError("pdf2image did not return any pages")
+        pages[0].convert("RGB").save(out_path)
+    finally:
+        # Cleanup artifacts
+        for ext in [".aux", ".log", ".tex", ".pdf"]:
+            f = work_dir / f"{job_name}{ext}"
+            if f.exists():
+                try: os.unlink(f)
+                except: pass
+                
+    return out_path
 
-    # Clean up temp files
-    _cleanup(work_dir, job_name)
-    
-    return out_path  # <--- RETURN ADDED
-
-
-def _matplotlib_render(expr: str, out_path: str, dpi: int = 150, fontsize: int = 10):
-    """Fallback renderer: uses matplotlib mathtext to render an expression."""
-    # Wrap expression in $...$ if not already math mode (matplotlib expects math mode).
+def _matplotlib_render(expr: str, out_path: str, dpi: int = 150, fontsize: int = 20):
+    """
+    Fallback renderer: uses matplotlib mathtext.
+    Uses Object-Oriented API (Figure) to avoid global state memory leaks.
+    """
     tex = expr
     if not (tex.startswith("$") and tex.endswith("$")):
-        if not (tex.startswith(r"\(") or tex.startswith(r"\[")):
-            tex = f"${tex}$"
+        tex = f"${tex}$"
 
-    fig = plt.figure(figsize=(0.01, 0.01))
+    # CHANGE: Use Figure() directly instead of plt.figure()
+    # This prevents the "More than 20 figures have been opened" warning
+    # because these figures are never registered with the pyplot state machine.
+    fig = Figure(figsize=(0.01, 0.01))
+    FigureCanvasAgg(fig) # Attach a canvas so we can save
+    
     fig.text(0.0, 0.0, tex, fontsize=fontsize)
-    # Tight bbox to crop around the rendered equation
-    try:
-        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", pad_inches=0.02)
-    finally:
-        plt.close(fig)
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", pad_inches=0.02)
+    # No plt.close(fig) needed because we never opened it in pyplot!
 
-
-def render_mathtext(expr: str, out_path: str, dpi: int = 150, prefer_latex: bool = True):
-    """
-    Main entry point. 
-    Attempts to render using LaTeX (pdflatex) if prefer_latex is True.
-    Falls back to Matplotlib if LaTeX fails or is not preferred.
-    """
-    # 1. Try LaTeX (Priority)
+def render_mathtext(expr, out_path, dpi=150, prefer_latex=False):
+    # 1. Try LaTeX
     if prefer_latex and HAVE_PDF2IMAGE:
         try:
             _latex_render(expr, out_path, dpi=dpi)
             return
         except Exception as e:
-            # If LaTeX fails, just fall through to Matplotlib
-            # print(f"LaTeX failed for {expr[:20]}...: {e}")
+            # print(f"pdflatex failed: {e}")
             pass
 
     # 2. Fallback to Matplotlib
     try:
-        # Use fontsize 10 to match IEEE body text
-        _matplotlib_render(expr, out_path, dpi=dpi, fontsize=10)
+        _matplotlib_render(expr, out_path, dpi=dpi)
     except Exception as e:
-        # If both fail, raise error so the caller knows to skip this formula
+        # If both fail, raise a clear error
         raise RuntimeError(f"Both renderers failed for: {expr[:30]}...")

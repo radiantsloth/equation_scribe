@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 # The problematic string (hardcoded exactly as you pasted it)
-FORMULA = r"\begin{array}{c} -++-++ \\ --++++ \\ --++-+ \\ --+-++ \\ --+--+\end{array}"
+FORMULA = r"\left<E\right>_{ren}^{mode}=\int_0^{\infty}d\omega  \frac1{2}\omega \left[N(\omega)-N_0(\omega)\right],\label{modesum}"
 
 # The Template (Standard/Robust version)
 TEX_TEMPLATE = r"""
