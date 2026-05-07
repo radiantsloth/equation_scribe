@@ -1,5 +1,4 @@
 
-```markdown
 # Equation Scribe
 
 Equation Scribe is a small toolchain to detect equations in technical papers (PDFs / scanned pages), extract and render them, and convert equation images into LaTeX. The project is split into a backend detector and utilities for synthetic data generation and training.
