@@ -21,3 +21,25 @@ __pycache__/
 *.pyc
 args.yaml
 ultralytics_check_output.txt
+
+# Node
+node_modules/
+dist/
+build/
+coverage/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local env/config
+.env
+.env.local
+.env.*.local
+
+# Project-generated data/artifacts
+runs/
+data/
+*.log
