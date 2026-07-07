@@ -91,7 +91,7 @@ def find_equation_candidates(spans: List[Dict[str, Any]], page_width: float) -> 
 
         # Heuristic: IEEE equations are often indented or centered *within their column*
         # But for now, raw mathy score is a good enough filter
-        if score >= 0.5: # Slightly higher threshold
+        if score >= 0.3:
             candidates.append({"text": text, "bbox_pdf": (x0, y0, x1, y1), "score": round(score, 3)})
 
     candidates.sort(key=lambda c: c["score"], reverse=True)

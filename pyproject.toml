@@ -17,5 +17,17 @@ dependencies = [
     "antlr4-python3-runtime==4.11",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "black",
+    "numpy",
+    "opencv-python",
+    "portalocker>=2.8.0",
+    "pytest",
+    "rapidfuzz>=2.0.0",
+    "tqdm",
+    "gradio",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]

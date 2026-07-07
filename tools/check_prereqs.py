@@ -96,8 +96,8 @@ def main():
         print("  - Install poppler (for pdftoppm) for pdf2image conversions.")
         print("  - Install Tesseract OCR for OCR fallback.")
         print("  - Install Node.js and npm if you will run the frontend.")
-        print("  - For Python packages, create your conda environment and run:")
-        print("      pip install -r requirements.txt")
+        print("  - For Python packages, create your environment and run:")
+        print("      pip install -r requirements-dev.txt")
         print("  - If you use ultralytics/yolo, ensure the 'yolo' CLI is on PATH or")
         print("    run training via 'python -m ultralytics' or 'python -m ultralytics.yolo'.")
 
