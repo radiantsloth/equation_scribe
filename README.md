@@ -26,9 +26,10 @@ See `docs/roadmap.md` (or your saved roadmap) for the full Spiral 2 plan.
 1. Create environment:
 
 ```bash
-conda create -n eqscribe python=3.11 -y
-conda activate eqscribe
-pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements-dev.txt
 ```
 2. Run system check:
 
@@ -127,7 +128,7 @@ A PDF-based equation annotation tool (frontend + backend) that provides:
 
 ## Repo layout
 
-equation_scribe_web/
+equation_scribe/apps/web/
 ├── backend/ # FastAPI backend
 ├── frontend/ # React + Vite + Konva frontend
 ├── docs/ # Spiral roadmaps & documentation
@@ -176,8 +177,8 @@ pip install -r requirements.txt
 
 2) Start the backend:
 
-cd C:\Data\repos\equation_scribe_web
-uvicorn backend.main:app --reload --port 8000 --reload-dir backend
+cd [EQSCRIBE_ROOT]\equation_scribe
+uvicorn apps.web.backend.main:app --reload --reload-dir apps/web/backend
 
 Backend endpoints of interest:
 
@@ -204,6 +205,13 @@ Notes:
 If you see ModuleNotFoundError: No module named 'backend', run uvicorn from the repo root (as shown).
 
 For LaTeX parsing, SymPy requires antlr4-python3-runtime==4.11 (install if you see ANTLR errors).
+
+If you already have the wrong `fitz` package installed, uninstall it before installing dependencies:
+
+```powershell
+python -m pip uninstall -y fitz
+python -m pip install pymupdf
+```
 
 Frontend (React + Vite + Konva)
 
@@ -259,5 +267,4 @@ This writes PROFILES_ROOT/MyPaper/equations.jsonl and updates PROFILES_ROOT/inde
 (Add license here)
 
 Maintainer: Rick Spangler (spanglermobile@gmail.com)
-
 

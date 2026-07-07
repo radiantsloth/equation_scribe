@@ -2,7 +2,8 @@ from pathlib import Path
 import os
 import hashlib
 import json
-from typing import List, Dict, Any
+from math import ceil, floor
+from typing import Callable, List, Dict, Any, Optional, Tuple
 
 from fastapi import Body, FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,6 +58,43 @@ def slugify(name: str) -> str:
     stem = Path(name).stem
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in stem)
     return safe or "paper"
+
+def pdf_bbox_to_crop_box(
+    pdf2px: Callable[[float, float], Tuple[int, int]],
+    bbox_pdf: List[float] | Tuple[float, float, float, float],
+    image_size: Tuple[int, int],
+    pad: int = 5,
+) -> Optional[Tuple[int, int, int, int]]:
+    """Convert a PDF-space bbox into a clipped PIL crop box.
+
+    Returns None when the box is fully outside the rendered image or collapses
+    to an empty rectangle after clipping.
+    """
+    try:
+        if len(bbox_pdf) != 4:
+            return None
+        x0, y0, x1, y1 = (float(v) for v in bbox_pdf)
+    except (TypeError, ValueError):
+        return None
+
+    px0, py0 = pdf2px(x0, y0)
+    px1, py1 = pdf2px(x1, y1)
+
+    left = floor(min(px0, px1) - pad)
+    top = floor(min(py0, py1) - pad)
+    right = ceil(max(px0, px1) + pad)
+    bottom = ceil(max(py0, py1) + pad)
+
+    w, h = image_size
+    left = max(0, min(w, left))
+    top = max(0, min(h, top))
+    right = max(0, min(w, right))
+    bottom = max(0, min(h, bottom))
+
+    if right <= left or bottom <= top:
+        return None
+
+    return (left, top, right, bottom)
 
 def pdf_path_for(paper_id: str) -> Path:
     p = PAPERS_ROOT / f"{paper_id}.pdf"
@@ -157,20 +195,12 @@ def _adjudicate_record(paper_id: str, rec: EquationRecord):
     
     full_page_img = page_image(doc, page_ix, dpi=150)
     pdf2px, _ = pdf_to_px_transform(doc, page_ix, dpi=150)
-    
-    x0, y0, x1, y1 = bbox_pdf
-    px0, py0 = pdf2px(x0, y0)
-    px1, py1 = pdf2px(x1, y1)
-    
-    pad = 5
-    w, h = full_page_img.size
-    crop_box = (
-        max(0, min(px0, px1) - pad), 
-        max(0, min(py0, py1) - pad), 
-        min(w, max(px0, px1) + pad), 
-        min(h, max(py0, py1) + pad)
-    )
-    
+
+    crop_box = pdf_bbox_to_crop_box(pdf2px, bbox_pdf, full_page_img.size)
+    if crop_box is None:
+        print(f"Skipping adjudication for invalid bbox on {paper_id} page {page_ix}: {bbox_pdf}")
+        return
+
     crop_img = full_page_img.crop(crop_box)
     
     adjudicator.save_correction(
@@ -198,18 +228,10 @@ def rescan_box(paper_id: str, payload: RescanRequest):
     full_page_img = page_image(doc, payload.page_index, dpi=150)
     pdf2px, _ = pdf_to_px_transform(doc, payload.page_index, dpi=150)
 
-    x0, y0, x1, y1 = payload.bbox
-    px0, py0 = pdf2px(x0, y0)
-    px1, py1 = pdf2px(x1, y1)
+    crop_box = pdf_bbox_to_crop_box(pdf2px, payload.bbox, full_page_img.size)
+    if crop_box is None:
+        raise HTTPException(400, "Bounding box is outside the rendered page")
 
-    pad = 5
-    w, h = full_page_img.size
-    crop_box = (
-        max(0, min(px0, px1) - pad), 
-        max(0, min(py0, py1) - pad), 
-        min(w, max(px0, px1) + pad), 
-        min(h, max(py0, py1) + pad)
-    )
     crop_img = full_page_img.crop(crop_box)
     latex_result = image_to_latex(crop_img)
     return {"latex": latex_result}
@@ -295,19 +317,11 @@ def autodetect_all(paper_id: str):
                     continue
                 # -----------------------------
 
-                x0, y0, x1, y1 = cand_box
-                px0, py0 = pdf2px(x0, y0)
-                px1, py1 = pdf2px(x1, y1)
-                
-                pad = 5
-                w, h = full_page_img.size
-                crop_box = (
-                    max(0, min(px0, px1) - pad), 
-                    max(0, min(py0, py1) - pad), 
-                    min(w, max(px0, px1) + pad), 
-                    min(h, max(py0, py1) + pad)
-                )
-                
+                crop_box = pdf_bbox_to_crop_box(pdf2px, cand_box, full_page_img.size)
+                if crop_box is None:
+                    print(f"Skipping invalid candidate bbox on {paper_id} page {page_ix}: {cand_box}")
+                    continue
+
                 crop_img = full_page_img.crop(crop_box)
                 latex = image_to_latex(crop_img)
                 
