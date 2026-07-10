@@ -1,93 +1,39 @@
-# equation_scribe/profile_index.py
-"""
-profile_index.py — manage a central index.json mapping PDFs to profile directories.
+"""Compatibility wrapper for shared index storage helpers.
 
-This module uses portalocker to ensure safe concurrent reads/writes. The index
-structure is:
-
-{
-  "version": 1,
-  "papers": {
-     "<paper_id>": {"profiles_dir": "...", "pdf_basename": "...", "num_equations": ...}
-  },
-  "by_pdf_basename": {
-     "<pdf_basename>": "<paper_id>"
-  }
-}
+The shared index implementation now lives in ``equation_scribe_core``. This
+module keeps the legacy import path stable while the rest of the codebase is
+migrated.
 """
 
-import json
-import portalocker
-import os
 from pathlib import Path
-from typing import Dict, Any, Optional
-from datetime import datetime, timezone
+import sys
+from typing import Any, Dict, Optional
 
-INDEX_FILENAME = "index.json"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+try:
+    from equation_scribe_core.io import INDEX_FILENAME
+    from equation_scribe_core.io import load_index as _core_load_index
+    from equation_scribe_core.io import register_paper as _core_register_paper
+    from equation_scribe_core.io import save_index as _core_save_index
+except ModuleNotFoundError:
+    core_src = Path(__file__).resolve().parents[1] / "packages" / "core" / "src"
+    if str(core_src) not in sys.path:
+        sys.path.insert(0, str(core_src))
+    from equation_scribe_core.io import INDEX_FILENAME
+    from equation_scribe_core.io import load_index as _core_load_index
+    from equation_scribe_core.io import register_paper as _core_register_paper
+    from equation_scribe_core.io import save_index as _core_save_index
 
 
 def load_index(root: Path) -> Dict[str, Any]:
-    """
-    Load the index file from `root / INDEX_FILENAME`.
+    """Load the shared index and return the legacy dictionary shape."""
 
-    Uses a shared lock for the read so readers won't race with writers.
-    Returns a safe skeleton if the index file does not exist or is empty.
-    """
-    idx_path = root / INDEX_FILENAME
-    # Ensure parent dir exists (safe to call even if file exists)
-    idx_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # If file doesn't exist yet, return an empty index skeleton
-    if not idx_path.exists():
-        return {"version": 1, "papers": {}, "by_pdf_basename": {}}
-
-    # Open the file and acquire a shared lock while reading.
-    with idx_path.open("r", encoding="utf-8") as fh:
-        portalocker.lock(fh, portalocker.LOCK_SH)  # shared lock for read
-        try:
-            fh.seek(0)
-            data_text = fh.read()
-            if not data_text.strip():
-                # empty file -> return skeleton
-                return {"version": 1, "papers": {}, "by_pdf_basename": {}}
-            data = json.loads(data_text)
-        finally:
-            portalocker.unlock(fh)
-
-    # Normalize / ensure keys exist (upgrade-safe)
-    if "version" not in data:
-        data["version"] = 1
-    if "papers" not in data:
-        data["papers"] = {}
-    if "by_pdf_basename" not in data:
-        data["by_pdf_basename"] = {}
-
-    return data
+    return _core_load_index(root).model_dump(mode="json")
 
 
 def save_index(root: Path, index: Dict[str, Any]) -> None:
-    """
-    Atomically save the index JSON to `root / INDEX_FILENAME` under an exclusive lock.
-    """
-    idx_path = root / INDEX_FILENAME
-    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    """Save the legacy dictionary shape through the shared core helper."""
 
-    # Open file for read/write (create if not exists)
-    mode = "r+" if idx_path.exists() else "w+"
-    with idx_path.open(mode, encoding="utf-8") as fh:
-        portalocker.lock(fh, portalocker.LOCK_EX)
-        try:
-            fh.seek(0)
-            fh.truncate()
-            fh.write(json.dumps(index, ensure_ascii=False, indent=2))
-            fh.flush()
-            os.fsync(fh.fileno())
-        finally:
-            portalocker.unlock(fh)
+    _core_save_index(root, index)
 
 
 def register_paper(
@@ -99,42 +45,13 @@ def register_paper(
     num_equations: Optional[int] = None,
     force: bool = False,
 ) -> None:
-    profiles_dir = profiles_dir or paper_id
+    """Register one paper entry using the shared core implementation."""
 
-    # Load index under shared lock; save_index / register will use exclusive locks as needed.
-    index = load_index(root)
-    papers = index["papers"]
-    by_pdf = index["by_pdf_basename"]
-
-    existing_for_pdf = by_pdf.get(pdf_basename)
-    if existing_for_pdf and existing_for_pdf != paper_id and not force:
-        raise RuntimeError(
-            f"PDF basename {pdf_basename!r} is already associated with paper_id {existing_for_pdf!r}."
-        )
-
-    if paper_id in papers and not force:
-        raise RuntimeError(f"paper_id {paper_id!r} already exists in index. Use --force to overwrite.")
-
-    now = _now_iso()
-    entry = papers.get(paper_id, {})
-    created_at = entry.get("created_at", now)
-
-    pdf_basename = pdf_basename.lower()
-    entry.update(
-        {
-            "paper_id": paper_id,
-            "pdf_basename": pdf_basename,
-            "profiles_dir": profiles_dir,
-            "created_at": created_at,
-            "updated_at": now,
-        }
+    _core_register_paper(
+        root,
+        paper_id=paper_id,
+        pdf_basename=pdf_basename,
+        profiles_dir=profiles_dir,
+        num_equations=num_equations,
+        force=force,
     )
-
-    if num_equations is not None:
-        entry["num_equations"] = int(num_equations)
-
-    papers[paper_id] = entry
-    by_pdf[pdf_basename] = paper_id
-
-    # Write index under exclusive lock
-    save_index(root, index)

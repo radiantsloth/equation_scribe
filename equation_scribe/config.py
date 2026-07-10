@@ -1,29 +1,55 @@
-# equation_scribe/config.py
+"""Compatibility wrapper for shared stable constants.
+
+The shared constants now live in ``equation_scribe_core.config.constants``.
+This module re-exports them so existing imports keep working during the
+migration.
 """
-Central configuration / constants for equation_scribe projects.
-Helps avoid hard-coded literal constants scattered through the code.
-"""
 
-DEFAULT_DPI = 150
-PAGE_WIDTH_IN = 8.5
-PAGE_HEIGHT_IN = 11.0
-DEFAULT_PAGE_W_PX = int(PAGE_WIDTH_IN * DEFAULT_DPI)
-DEFAULT_PAGE_H_PX = int(PAGE_HEIGHT_IN * DEFAULT_DPI)
+from pathlib import Path
+import sys
 
-# Rotation augmentation: maximum rotation range (± degrees).
-ROTATION_AUG_MAX_ANGLE = 15
+try:
+    from equation_scribe_core.config.constants import (
+        DEFAULT_DPI,
+        DEFAULT_PAGE_H_PX,
+        DEFAULT_PAGE_W_PX,
+        DESKEW_THRESHOLD_DEG,
+        MAX_EQ_HEIGHT_FRAC,
+        MAX_EQ_WIDTH_FRAC,
+        MAX_PLACEMENT_ATTEMPTS,
+        NON_OVERLAP_IOU,
+        PAGE_HEIGHT_IN,
+        PAGE_WIDTH_IN,
+        ROTATION_AUG_MAX_ANGLE,
+    )
+except ModuleNotFoundError:
+    core_src = Path(__file__).resolve().parents[1] / "packages" / "core" / "src"
+    if str(core_src) not in sys.path:
+        sys.path.insert(0, str(core_src))
+    from equation_scribe_core.config.constants import (
+        DEFAULT_DPI,
+        DEFAULT_PAGE_H_PX,
+        DEFAULT_PAGE_W_PX,
+        DESKEW_THRESHOLD_DEG,
+        MAX_EQ_HEIGHT_FRAC,
+        MAX_EQ_WIDTH_FRAC,
+        MAX_PLACEMENT_ATTEMPTS,
+        NON_OVERLAP_IOU,
+        PAGE_HEIGHT_IN,
+        PAGE_WIDTH_IN,
+        ROTATION_AUG_MAX_ANGLE,
+    )
 
-# If an estimated deskew angle is smaller (in absolute value) than this,
-# we consider the page already upright and skip deskewing.
-DESKEW_THRESHOLD_DEG = 0.75
-
-# Limits for equation image size relative to page when generating synthetic pages.
-MAX_EQ_WIDTH_FRAC = 0.6
-MAX_EQ_HEIGHT_FRAC = 0.25
-
-# For placing boxes, maximum allowed IoU when `require_non_overlap=True`.
-# If IoU > NON_OVERLAP_IOU, we consider that overlapping and will retry placement.
-NON_OVERLAP_IOU = 0.0  # strict; change to 0.05 or 0.1 to allow tiny overlaps
-
-# Number of attempts before giving up placing a single box on a page
-MAX_PLACEMENT_ATTEMPTS = 1000
+__all__ = [
+    "DEFAULT_DPI",
+    "PAGE_WIDTH_IN",
+    "PAGE_HEIGHT_IN",
+    "DEFAULT_PAGE_W_PX",
+    "DEFAULT_PAGE_H_PX",
+    "ROTATION_AUG_MAX_ANGLE",
+    "DESKEW_THRESHOLD_DEG",
+    "MAX_EQ_WIDTH_FRAC",
+    "MAX_EQ_HEIGHT_FRAC",
+    "NON_OVERLAP_IOU",
+    "MAX_PLACEMENT_ATTEMPTS",
+]

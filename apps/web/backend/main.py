@@ -1,20 +1,30 @@
 from pathlib import Path
 import os
 import hashlib
-import json
 from math import ceil, floor
 from typing import Callable, List, Dict, Any, Optional, Tuple
+import sys
 
 from fastapi import Body, FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from .schemas import EquationRecord
-from .storage import read_equations, append_equation, update_equation, delete_equation
 from .services.pdf import page_count, render_page_png, page_meta
 from .services.validate import validate_latex
 from .adjudication import AdjudicationManager
+
+try:
+    from equation_scribe_core.config import get_runtime_settings
+    from equation_scribe_core.io import append_equation, delete_equation, load_index, read_equations, update_equation
+    from equation_scribe_core.models import EquationRecord
+except ModuleNotFoundError:
+    core_src = Path(__file__).resolve().parents[3] / "packages" / "core" / "src"
+    if str(core_src) not in sys.path:
+        sys.path.insert(0, str(core_src))
+    from equation_scribe_core.config import get_runtime_settings
+    from equation_scribe_core.io import append_equation, delete_equation, load_index, read_equations, update_equation
+    from equation_scribe_core.models import EquationRecord
 
 from equation_scribe.recognition.inference import image_to_latex
 from equation_scribe.pdf_ingest import load_pdf, page_image, page_layout, page_size_points, pdf_to_px_transform
@@ -24,11 +34,9 @@ import uuid
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 YOLO_MODEL_PATH = Path(__file__).parent / "models" / "best.pt" 
-PROFILES_ROOT = Path(os.getenv("PROFILES_ROOT", "data/profiles"))
-PAPERS_ROOT = Path(os.getenv("PAPERS_ROOT", "data/pdfs"))
-
-PROFILES_ROOT.mkdir(parents=True, exist_ok=True)
-PAPERS_ROOT.mkdir(parents=True, exist_ok=True)
+RUNTIME_SETTINGS = get_runtime_settings()
+PROFILES_ROOT = RUNTIME_SETTINGS.profiles_root
+PAPERS_ROOT = RUNTIME_SETTINGS.papers_root
 
 app = FastAPI(title="Equation Scribe API")
 adjudicator = AdjudicationManager()
@@ -101,16 +109,6 @@ def pdf_path_for(paper_id: str) -> Path:
     if p.exists(): return p
     raise HTTPException(404, f"PDF for paper_id '{paper_id}' not found")
 
-def load_profiles_index() -> dict:
-    idx_path = PROFILES_ROOT / "index.json"
-    if not idx_path.exists():
-        return {"version": 1, "papers": {}, "by_pdf_basename": {}}
-    try:
-        with idx_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {"version": 1, "papers": {}, "by_pdf_basename": {}}
-
 # --- HELPER: IoU for Deduplication ---
 def calculate_iou(boxA, boxB):
     # box: [x0, y0, x1, y1]
@@ -145,7 +143,7 @@ def get_pages(paper_id: str):
 
 @app.get("/papers/index")
 def get_profiles_index_endpoint():
-    return load_profiles_index()
+    return load_index(PROFILES_ROOT).model_dump(mode="json")
 
 @app.get("/papers/{paper_id}/page/{idx}/image")
 def get_page_image_endpoint(paper_id: str, idx: int, zoom: float = 1.5):

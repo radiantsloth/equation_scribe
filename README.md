@@ -1,270 +1,330 @@
-
 # Equation Scribe
 
-Equation Scribe is a small toolchain to detect equations in technical papers (PDFs / scanned pages), extract and render them, and convert equation images into LaTeX. The project is split into a backend detector and utilities for synthetic data generation and training.
+Equation Scribe is a PDF equation annotation and training toolkit. It has two
+main surfaces:
 
-**This repo contains:**
-- `equation_scribe/detector/` — detector utilities: synthetic data generator, preprocessing, tiling,
-  COCO conversion and quick training/inference scripts.
-- `tools/` — helper scripts (system checks, small utilities).
-- `docs/` — docs for deployment and other notes.
-- `tools/run_demo.ps1` — quick end-to-end demo helper (Windows Powershell script).
+- a web app for uploading PDFs, reviewing detected equations, editing boxes,
+  validating LaTeX, and saving paper profiles
+- detector and recognition utilities for generating data, preparing datasets,
+  and training models
 
----
+Shared storage, models, index management, runtime settings, and path utilities
+now live in `packages/core` under the `equation_scribe_core` package.
 
-## Goals & Spiral Plan
+## Repo Layout
 
-- **Spiral 1**: basic detector and pipeline, synthetic training data, quick YOLOv8 training to detect equations.
-- **Spiral 2**: robust equation detection across scanned PDFs, rotation-aware tight bounding boxes, conversion of equation images to LaTeX (im2latex), GUI improvements for human-in-the-loop editing.
+- `apps/web/backend/` FastAPI backend for the annotation app
+- `apps/web/frontend/` React + Vite frontend for the annotation app
+- `equation_scribe/` detector, recognition, PDF, and CLI utilities
+- `packages/core/` shared core package introduced by the migration
+- `tools/` helper scripts for prerequisite checks and dataset conversion
+- `docs/` architecture and planning notes
 
-See `docs/roadmap.md` (or your saved roadmap) for the full Spiral 2 plan.
+## Environment Setup
 
----
+### Python
 
-## Quickstart (developer)
+Create and activate a virtual environment:
 
-1. Create environment:
-
-```bash
+```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements-dev.txt
-```
-2. Run system check:
-
-python tools/check_prereqs.py
-
-
-Generate quick synthetic data:
-
-python -m equation_scribe.detector.synthetic_coco \
-  --out-images detector/data/images/synth \
-  --out-anns detector/data/annotations/instances_all.json \
-  --n-pages 5 --eqs-per-page 6 --dpi 150
-
-
-3. Split COCO annotations into tiles and train:
-```bash
-python -m equation_scribe.detector.split_coco_by_paper --in detector/data/annotations/instances_all.json --out detector/data/annotations --val-frac 0.2
-# quick YOLO training via ultralytics
-yolo detect train data=equation_scribe/detector/detector.yaml model=yolov8s.pt epochs=5 imgsz=1024
+python -m pip install -e .
 ```
 
-(If yolo CLI is not on PATH, run python -m ultralytics.)
+`pip install -e .` is recommended so `equation_scribe_core` is importable
+without relying on ad hoc `PYTHONPATH` setup.
 
-Run inference on a single image:
-```bash
-python equation_scribe/detector/inference.py --model runs/detect/eq_detector_quick/weights/best.pt --image detector/data/images/synth_pre/page_0000.png --conf 0.25
-```
-
-4. Helpful scripts
-
-tools/check_prereqs.py — local environment checks (binaries and Python packages).
-
-tools/check_files_exist.py — verify COCO image paths exist (useful for debugging dataset generation).
-
-tools/run_demo.ps1 — windows demo that runs through synthetic generation, train and inference steps.
-
-5. Synthetic dataset generation
-
-The synthetic_coco.py generator:
-
-Renders LaTeX math using pdflatex where possible, else falls back to matplotlib’s mathtext.
-
-Pastes multiple equation images per page with a non-overlap constraint and produces COCO-style annotations.
-
-Supports rotation augmentation (--rotate-aug, --rotate-max) and deskewing options.
-
-If you see rotated equations where the bounding box is too small, enable the tight-rotated-bbox code path (now included in the generator) that computes the correct rotated bounding box. See the generator docstring for flags.
-
-Notes about training & metrics
-
-We use YOLOv8 (Ultralytics) for quick experiments. The detector.yaml dataset file should point to the tiled images and the instances_tiles_train.json and instances_tiles_val.json COCO files.
-
-Good indicators of training quality:
-
-mAP@0.50 and mAP@[0.50:0.95] over the validation set.
-
-Precision / recall and PR curves printed by Ultralytics.
-
-For synthetic-only training, expect the detector to generalize poorly to real scanned papers. To improve:
-
-Add real annotated papers (arXiv / IEEE style) to training/validation.
-
-Increase synthetic data variety and augmentations (noise, blur, deskew, lighting).
-
-Fine-tune detection to prefer tight bounding boxes (rotate-aware).
-
-6. Where to look for outputs
-
-Synthetic images: detector/data/images/synth (and synth_pre if deskew/rotation options used).
-
-COCO annotations: detector/data/annotations/*
-
-YOLO training runs: runs/detect/<run_name>
-
-Trained weights: runs/detect/<run_name>/weights/
-
-7. Contributing and cleanup
-
-Please avoid committing large training data into the repo. Keep data in detector/data/ locally.
-
-When regenerating synthetic data, clear detector/data/images/synth and detector/data/annotations/* before running the generator.
-
-Run pytest -q to run the unit tests in detector/tests/.
-
-# Equation Scribe Web (React + PDF.js + Konva + FastAPI)
-
-A PDF-based equation annotation tool (frontend + backend) that provides:
-- interactive PDF viewing and zoom
-- drawing / moving / resizing equation bounding boxes
-- LaTeX editing and KaTeX preview
-- LaTeX validation (SymPy/ANTLR)
-- saving per-paper structured JSONL「equations.jsonl」profiles
-- an index that maps PDFs → `paper_id` profiles for consistent loading
-
----
-
-## Repo layout
-
-equation_scribe/apps/web/
-├── backend/ # FastAPI backend
-├── frontend/ # React + Vite + Konva frontend
-├── docs/ # Spiral roadmaps & documentation
-└── paper_profiles/ # saved JSONL profiles (local example)
-
-
----
-
-## Quickstart (development)
-
-These examples assume Windows PowerShell and a Conda environment named `eqscribe`. Adjust paths and shell commands for Linux/macOS.
-
-### Prereqs
-- Python 3.10+ (3.11 tested)
-- Conda (recommended)
-- Node.js 18+ and npm 9+
-- Optional: Tesseract OCR installed & on PATH (for heuristic OCR in autodetect)
-
-### Environment
-Create/activate the conda environment (if you have `environment.yml`):
+If you prefer Conda, the repo also includes `environment.yml`:
 
 ```powershell
 conda env create -f environment.yml -n eqscribe
 conda activate eqscribe
+python -m pip install -e .
+```
 
-or manually
+### Optional Training Dependencies
 
+Some training and rendering paths depend on packages that are not installed by
+`requirements-dev.txt` alone.
+
+- `ultralytics` for YOLO training and detector inference
+- `torch` for YOLO and recognition inference/training
+- `matplotlib` for the synthetic generator fallback renderer
+- `pdf2image` for PDF-to-image conversion helpers
+- `pytesseract` and the Tesseract binary for OCR-assisted flows
+
+Example:
+
+```powershell
+python -m pip install ultralytics matplotlib pdf2image pytesseract
+```
+
+Install PyTorch using the command recommended for your platform from the
+official PyTorch installer.
+
+### External Tools
+
+Depending on which workflows you use, you may also need:
+
+- `pdflatex` for higher-fidelity LaTeX rendering in synthetic data generation
+- `pdftoppm` from Poppler for `pdf2image`
+- `tesseract` for OCR fallback
+- `node` and `npm` for the web frontend
+
+You can check the local environment with:
+
+```powershell
+python tools/check_prereqs.py
+```
+
+## Running The Web GUI
+
+The active GUI is the web app under `apps/web`. The old
+`equation_scribe/ui_gradio.py` module is deprecated and should not be treated
+as the primary UI.
+
+### Backend
+
+The backend defaults to:
+
+- `data/pdfs` for uploaded PDFs
+- `data/profiles` for saved equation profiles and `index.json`
+
+You can override those locations with environment variables:
+
+```powershell
+$env:PAPERS_ROOT = "C:\path\to\pdfs"
+$env:PROFILES_ROOT = "C:\path\to\profiles"
+```
+
+Start the backend from the repo root:
+
+```Anaconda Shell
+cd [equation_scribe root]
 conda activate eqscribe
-pip install -r requirements.txt
+uvicorn apps.web.backend.main:app --reload
+```
 
-# temporary for current session
-$env:PAPERS_ROOT = "C:\[BASEDIR]\papers"
-$env:PROFILES_ROOT = "C:\[BASEDIR]\paper_profiles"
+The backend listens on `http://127.0.0.1:8000`.
 
-To make permanent on Windows
+### Frontend
 
-setx PAPERS_ROOT "C:\[BASEDIR]\papers"
-setx PROFILES_ROOT "C:\[BASEDIR]\paper_profiles"
+Start the frontend from `apps/web/frontend`:
 
-Backend (FastAPI)
+```powershell
+cd apps/web/frontend
+npm install
+npm run dev
+```
 
-From repo root (equation_scribe_web), ensure dependencies installed:
+Vite runs on `http://127.0.0.1:5173`, which matches the hardcoded API target in
+`apps/web/frontend/src/api/client.ts`.
 
-conda activate eqscribe
-pip install -r requirements.txt
+### Typical GUI Flow
 
-2) Start the backend:
+1. Start the backend.
+2. Start the frontend.
+3. Open `http://127.0.0.1:5173`.
+4. Upload a PDF through the UI.
+5. Review pages, draw or edit boxes, validate LaTeX, and save equation records.
+6. Optionally use the "Scan Entire Paper" action to run backend autodetection
+   across the uploaded PDF.
 
-cd [EQSCRIBE_ROOT]\equation_scribe
-uvicorn apps.web.backend.main:app --reload --reload-dir apps/web/backend
+### Backend Endpoints In Current Use
 
-Backend endpoints of interest:
+- `POST /upload`
+- `GET /papers/index`
+- `GET /papers/{paper_id}/pages`
+- `GET /papers/{paper_id}/page/{idx}/image`
+- `GET /papers/{paper_id}/page/{idx}/meta`
+- `GET /papers/{paper_id}/equations`
+- `POST /papers/{paper_id}/equations`
+- `PUT /papers/{paper_id}/equations/{eq_uid}`
+- `DELETE /papers/{paper_id}/equations/{eq_uid}`
+- `POST /validate`
+- `POST /papers/{paper_id}/rescan_box`
+- `POST /papers/{paper_id}/autodetect_all`
 
-GET /papers/index — profiles index JSON.
+## Detector Training Workflow
 
-GET /papers/find_by_pdf?basename=<name> — find a profile by PDF basename.
+The training path in this repo is:
 
-GET /papers/{paper_id}/equations — list equations for a paper.
+1. generate synthetic pages and COCO annotations
+2. split the COCO file into train and validation sets by paper
+3. optionally preprocess page images
+4. tile images into detector-sized crops
+5. convert tiled COCO annotations to YOLO label files
+6. train YOLO with a dataset yaml that points at the tiled images
 
-POST /papers/{paper_id}/equations — append a new equation.
+### 1. Generate Synthetic Data
 
-PUT /papers/{paper_id}/equations/{eq_uid} — update an equation record.
-
-DELETE /papers/{paper_id}/equations/{eq_uid} — delete an equation.
-
-GET /papers/{paper_id}/page/{idx}/image and /meta — page image and metadata.
-
-POST /validate — validate LaTeX with SymPy.
-
-CORS: The backend allows the default dev origin (http://127.0.0.1:5173). If your frontend runs elsewhere, update CORS settings in backend/main.py.
+```powershell
+python -m equation_scribe.detector.synthetic_coco `
+  --out-images detector/data/images/synth `
+  --out-anns detector/data/annotations/instances_all.json `
+  --n-pages 50 `
+  --n-papers 200 `
+  --eqs-per-page 4 `
+  --dpi 150
+```
 
 Notes:
 
-If you see ModuleNotFoundError: No module named 'backend', run uvicorn from the repo root (as shown).
+- The generator can use `pdflatex` when available and otherwise falls back to
+  `matplotlib`.
+- Output image names are grouped by synthetic paper id, which is what the split
+  script expects.
 
-For LaTeX parsing, SymPy requires antlr4-python3-runtime==4.11 (install if you see ANTLR errors).
-
-If you already have the wrong `fitz` package installed, uninstall it before installing dependencies:
+### 2. Split Train / Validation By Paper
 
 ```powershell
-python -m pip uninstall -y fitz
-python -m pip install pymupdf
+python -m equation_scribe.detector.split_coco_by_paper `
+  --coco detector/data/annotations/instances_all.json `
+  --out-dir detector/data/annotations `
+  --val-frac 0.2 `
+  --seed 0
 ```
 
-Frontend (React + Vite + Konva)
+This produces:
 
-Install and run:
+- `detector/data/annotations/instances_train.json`
+- `detector/data/annotations/instances_val.json`
 
-cd frontend
-npm install
-npm run dev
-Vite will show a local URL (commonly http://127.0.0.1:5173). Open in the browser.
+### 3. Optional Preprocessing
 
-If you see Cannot find @vitejs/plugin-react, run:
+If you want a more scan-like image set before tiling:
 
-powershell
-Copy code
-cd frontend
-npm install @vitejs/plugin-react --save-dev
-Windows note: fsevents warnings are normal and can be ignored.
+```powershell
+python -m equation_scribe.detector.preprocess `
+  --input detector/data/images/synth `
+  --output detector/data/images/synth_pre `
+  --denoise --deskew --clahe --binarize
+```
 
-Autodetector CLI (equation_scribe repo)
-The heuristic autodetector and profile registration are in the equation_scribe project (separate repo). Example usage:
+If you skip this step, use `detector/data/images/synth` as the image root in
+the tiling step below.
 
-powershell
-Copy code
-# in equation_scribe repo
-conda activate eqscribe
+### 4. Tile The Train And Validation Sets
+
+```powershell
+python -m equation_scribe.detector.tiling `
+  --coco detector/data/annotations/instances_train.json `
+  --images-root detector/data/images/synth_pre `
+  --out-images detector/data/images/tiles_train `
+  --out-annotations detector/data/annotations/instances_tiles_train.json `
+  --tile-size 1024 `
+  --stride 512
+
+python -m equation_scribe.detector.tiling `
+  --coco detector/data/annotations/instances_val.json `
+  --images-root detector/data/images/synth_pre `
+  --out-images detector/data/images/tiles_val `
+  --out-annotations detector/data/annotations/instances_tiles_val.json `
+  --tile-size 1024 `
+  --stride 512
+```
+
+### 5. Convert Tiled COCO To YOLO Labels
+
+```powershell
+python tools/convert_coco_to_yolo.py `
+  --coco detector/data/annotations/instances_tiles_train.json `
+  --dataset-root detector/data `
+  --out-labels detector/data/labels
+
+python tools/convert_coco_to_yolo.py `
+  --coco detector/data/annotations/instances_tiles_val.json `
+  --dataset-root detector/data `
+  --out-labels detector/data/labels
+```
+
+### 6. Point YOLO At The Tiled Dataset
+
+Before training, verify the dataset yaml. The checked-in
+`equation_scribe/detector/detector.yaml` currently contains a machine-specific
+absolute path and should be reviewed locally.
+
+For the tiled workflow above, the important values should look like:
+
+```yaml
+path: C:/path/to/your/repo/equation_scribe/detector/data
+train: images/tiles_train
+val: images/tiles_val
+nc: 1
+names:
+  0: equation
+```
+
+### 7. Train YOLO
+
+```powershell
+yolo task=detect mode=train `
+  model=yolov8s.pt `
+  data=equation_scribe/detector/detector.yaml `
+  epochs=5 `
+  imgsz=1024 `
+  batch=4 `
+  name=eq_detector_quick
+```
+
+If the `yolo` CLI is not on `PATH`, use the Python entrypoint provided by your
+Ultralytics install instead.
+
+### 8. Run Detector Inference
+
+```powershell
+python -m equation_scribe.detector.inference `
+  --model runs/detect/eq_detector_quick/weights/best.pt `
+  --image detector/data/images/synth_pre/paper000_page_0000.png `
+  --conf 0.25
+```
+
+## Heuristic Autodetect CLI
+
+The heuristic autodetector remains available as a repo-local CLI:
+
+```powershell
 python -m equation_scribe.autodetect_equations `
-  --pdf "C:\[BASEDIR]\papers\MyPaper.pdf" `
+  --pdf "C:\path\to\papers\MyPaper.pdf" `
   --paper-id "MyPaper" `
-  --data-root "C:\[BASEDIR]\paper_profiles" `
-  --min-score 0.6 --force
-This writes PROFILES_ROOT/MyPaper/equations.jsonl and updates PROFILES_ROOT/index.json.
+  --data-root "C:\path\to\profiles" `
+  --min-score 0.6 `
+  --force
+```
 
+This writes:
 
----
+- `<data-root>/<paper-id>/equations.jsonl`
+- `<data-root>/index.json`
 
-# 📅 Roadmap (Next Spirals)
+This CLI now uses the shared core persistence and index layer introduced during
+the migration.
 
-* Spiral 2:
-  Reloading saved boxes + editing existing datasets
-* Spiral 3:
-  Auto-detect candidate equations (ML + heuristics)
-* Spiral 4:
-  Symbol extraction + glossary building
-* Spiral 5:
-  Full RAG pipeline: equation search + explanation + consistency checking
+## Useful Scripts
 
----
+- `python tools/check_prereqs.py` verify local binaries and Python packages
+- `powershell -ExecutionPolicy Bypass -File .\tools\run_demo.ps1` smoke test
+  the synthetic-data and detector pipeline
 
+## Testing
 
+Run the full test suite from the repo root:
 
-## License & Contacts
+```powershell
+python -m pytest -q
+```
 
-(Add license here)
+## Notes
 
-Maintainer: Rick Spangler (spanglermobile@gmail.com)
+- Avoid committing generated training data and model outputs.
+- The web app is the supported GUI. Gradio is legacy-only.
+- If imports in VS Code fail for `equation_scribe_core`, the workspace already
+  includes `.vscode/settings.json` with the extra analysis path for
+  `packages/core/src`.
 
+## License
+
+Add license information here.

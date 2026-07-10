@@ -1,4 +1,11 @@
 # equation_scribe/ui_gradio.py
+"""Deprecated Gradio UI entrypoint.
+
+The application has moved away from Gradio. This module is kept only as a
+legacy surface during the migration and should not be treated as the primary UI
+path going forward.
+"""
+
 from __future__ import annotations
 from pathlib import Path
 from typing import Tuple, List, Dict, Any
@@ -19,6 +26,14 @@ from .pdf_ingest import (
 from .detect import find_equation_candidates
 from .validate import validate_latex
 from .store import save_equation, canonical_hash
+
+try:
+    from equation_scribe_core.io import read_equations
+except ModuleNotFoundError:
+    core_src = Path(__file__).resolve().parents[1] / "packages" / "core" / "src"
+    if str(core_src) not in sys.path:
+        sys.path.insert(0, str(core_src))
+    from equation_scribe_core.io import read_equations
 
 
 # -------------------- drawing & geometry helpers --------------------
@@ -79,27 +94,17 @@ def _load_existing_boxes(store_root: Path, paper_id: str) -> Dict[int, List[Tupl
     """
     Return: page_index -> list of bbox_pdf (tuples)
     """
-    d = store_root / paper_id
-    path = d / "equations.jsonl"
     by_page: Dict[int, List[Tuple[float, float, float, float]]] = {}
-    if not path.exists():
-        return by_page
     try:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+        for rec in read_equations(store_root, paper_id):
+            boxes = rec.get("boxes") or []
+            for b in boxes:
+                pg = int(b.get("page", 0))
+                bb = b.get("bbox_pdf")
+                if not bb or len(bb) != 4:
                     continue
-                rec = json.loads(line)
-                # Spiral 1.1 schema: rec["boxes"] is a list of {"page": int, "bbox_pdf": [x0,y0,x1,y1]}
-                boxes = rec.get("boxes") or []
-                for b in boxes:
-                    pg = int(b.get("page", 0))
-                    bb = b.get("bbox_pdf")
-                    if not bb or len(bb) != 4:
-                        continue
-                    tup = (float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3]))
-                    by_page.setdefault(pg, []).append(tup)
+                tup = (float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3]))
+                by_page.setdefault(pg, []).append(tup)
     except Exception as e:
         print(f"[ui] warning: failed reading existing boxes: {e}", file=sys.stderr)
     return by_page

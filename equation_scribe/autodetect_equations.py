@@ -1,5 +1,6 @@
 # equation_scribe/autodetect_equations.py
-"""
+"""Heuristic equation autodetection with shared core persistence helpers.
+
 Record schema written to equations.jsonl (one JSON object per line):
 {
     "uid": "<unique-id>",
@@ -14,12 +15,24 @@ Record schema written to equations.jsonl (one JSON object per line):
 """
 from __future__ import annotations
 from dataclasses import dataclass
+import json
 from pathlib import Path
+import sys
+import time
+import shutil
 from typing import List, Dict, Any
 
 from .pdf_ingest import load_pdf, page_size_points, page_layout_with_ocr
 from .detect import find_equation_candidates
 from .store import canonical_hash
+
+try:
+    from equation_scribe_core.io import register_paper, write_jsonl
+except ModuleNotFoundError:
+    core_src = Path(__file__).resolve().parents[1] / "packages" / "core" / "src"
+    if str(core_src) not in sys.path:
+        sys.path.insert(0, str(core_src))
+    from equation_scribe_core.io import register_paper, write_jsonl
 
 # NOTE: we intentionally do not save per-record inside the loop.
 # Instead we collect all_records and write the JSONL once at the end,
@@ -109,20 +122,61 @@ def autodetect_equations(
     return all_records
 
 
+def write_detected_equations(
+    records: List[Dict[str, Any]],
+    *,
+    pdf_path: str | Path,
+    paper_id: str,
+    data_root: str | Path,
+    force: bool = False,
+) -> Path | None:
+    """Write autodetected records and update the shared paper index.
+
+    The current CLI behavior is preserved:
+    - do not overwrite an existing profile unless ``force`` is set
+    - when ``force`` is set, rotate the old ``equations.jsonl`` into the paper
+      directory with a timestamped ``.bak`` suffix before writing the new file
+    - always update the shared index after a successful write
+    """
+
+    profiles_root = Path(data_root)
+    paper_dir = profiles_root / paper_id
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    out_path = paper_dir / "equations.jsonl"
+
+    if out_path.exists() and not force:
+        print(f"ERROR: {out_path} already exists. Use --force to overwrite.")
+        return None
+
+    if out_path.exists() and force:
+        ts = int(time.time())
+        bak = paper_dir / f"equations.jsonl.bak.{ts}"
+        shutil.move(str(out_path), str(bak))
+        print(f"Backed up existing {out_path} to {bak}")
+
+    write_jsonl(out_path, records)
+    print(f"Wrote {len(records)} records to {out_path}")
+
+    pdf_basename = Path(pdf_path).name
+    try:
+        register_paper(
+            profiles_root,
+            paper_id=paper_id,
+            pdf_basename=pdf_basename,
+            profiles_dir=paper_id,
+            num_equations=len(records),
+            force=force,
+        )
+        print(f"Updated index.json under {profiles_root} for paper_id={paper_id!r}")
+    except RuntimeError as e:
+        print(f"WARNING: index not updated: {e}")
+
+    return out_path
+
+
 if __name__ == "__main__":
     # Simple CLI wrapper so you can run this from the command line.
     import argparse
-    import json
-    import shutil
-    import time
-
-    # Import register helper (ensure this file exists in your equation_scribe package)
-    try:
-        # prefer package local import
-        from .profile_index import register_paper
-    except Exception:
-        # if running as script, fallback to direct import
-        from profile_index import register_paper  # type: ignore
 
     ap = argparse.ArgumentParser(description="Heuristic equation auto-detector")
     ap.add_argument("--pdf", required=True, help="Path to input PDF")
@@ -155,41 +209,10 @@ if __name__ == "__main__":
     records = autodetect_equations(args.pdf, args.paper_id, args.data_root, cfg=cfg)
     print(json.dumps({"detected": len(records)}, indent=2))
 
-    # Write the JSONL file once, safely
-    profiles_root = Path(args.data_root)
-    paper_dir = profiles_root / args.paper_id
-    paper_dir.mkdir(parents=True, exist_ok=True)
-    out_path = paper_dir / "equations.jsonl"
-
-    # If the file exists and --force is not specified, do not overwrite
-    if out_path.exists() and not args.force:
-        print(f"ERROR: {out_path} already exists. Use --force to overwrite.")
-    else:
-        if out_path.exists() and args.force:
-            # rotate existing file
-            ts = int(time.time())
-            bak = paper_dir / f"equations.jsonl.bak.{ts}"
-            shutil.move(str(out_path), str(bak))
-            print(f"Backed up existing {out_path} to {bak}")
-
-        # Write new JSONL
-        with out_path.open("w", encoding="utf-8") as f:
-            for rec in records:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-        print(f"Wrote {len(records)} records to {out_path}")
-
-        # Update index (register paper)
-        pdf_basename = Path(args.pdf).name
-        try:
-            register_paper(
-                profiles_root,
-                paper_id=args.paper_id,
-                pdf_basename=pdf_basename,
-                profiles_dir=args.paper_id,
-                num_equations=len(records),
-                force=args.force,
-            )
-            print(f"Updated index.json under {profiles_root} for paper_id={args.paper_id!r}")
-        except RuntimeError as e:
-            print(f"WARNING: index not updated: {e}")
+    write_detected_equations(
+        records,
+        pdf_path=args.pdf,
+        paper_id=args.paper_id,
+        data_root=args.data_root,
+        force=args.force,
+    )

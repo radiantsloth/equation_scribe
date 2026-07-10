@@ -59,7 +59,16 @@ import random
 import re
 from collections import defaultdict
 from pathlib import Path
+import sys
 from typing import Dict, List, Tuple
+
+try:
+    from equation_scribe_core.io import read_jsonl, write_jsonl
+except ModuleNotFoundError:
+    core_src = Path(__file__).resolve().parents[2] / "packages" / "core" / "src"
+    if str(core_src) not in sys.path:
+        sys.path.insert(0, str(core_src))
+    from equation_scribe_core.io import read_jsonl, write_jsonl
 
 IMGID_RE = re.compile(r'img(\d+)', re.IGNORECASE)
 
@@ -80,24 +89,6 @@ def parse_args():
                    help="If provided with --coco-train and --coco-val, use those to assign crops.")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args()
-
-
-def read_jsonl(path: Path) -> List[Dict]:
-    recs = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            recs.append(json.loads(line))
-    return recs
-
-
-def write_jsonl(path: Path, records: List[Dict]):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
 def load_coco_images(coco_path: Path) -> Dict[int, Dict]:

@@ -4,7 +4,16 @@ from pathlib import Path
 from PIL import Image
 import argparse
 from collections import defaultdict
+import sys
 import time
+
+try:
+    from equation_scribe_core.io import read_jsonl
+except ModuleNotFoundError:
+    core_src = Path(__file__).resolve().parents[2] / "packages" / "core" / "src"
+    if str(core_src) not in sys.path:
+        sys.path.insert(0, str(core_src))
+    from equation_scribe_core.io import read_jsonl
 
 def bbox_to_coco(x0, y0, x1, y1):
     w = max(0.0, x1 - x0)
@@ -69,68 +78,68 @@ def convert_from_profiles(
         raise RuntimeError("profiles_jsonl_path not found")
 
     for f in files:
-        with f.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                rec = json.loads(line)
-                paper_id = rec.get("paper_id")
-                boxes = rec.get("boxes", [])
-                # If PDF path provided, try to load and map
-                doc = None
-                if pdf_path:
-                    try:
-                        pdf_path = Path(pdf_path)
-                        doc = load_pdf(pdf_path)
-                    except Exception:
-                        doc = None
-                for b in boxes:
-                    page = b.get("page", 0)
-                    bbox_pdf = b.get("bbox_pdf")  # expected [x0,y0,x1,y1] in PDF pts
-                    cls = b.get("cls", "display")
-                    # Map PDF bbox to pixels
-                    if doc and have_pdf_helpers and bbox_pdf:
-                        pdf2px, px2pdf = pdf_to_px_transform(doc, page)
-                        x0p, y0p = pdf2px(bbox_pdf[0], bbox_pdf[1])
-                        x1p, y1p = pdf2px(bbox_pdf[2], bbox_pdf[3])
+        for rec in read_jsonl(f):
+            if not isinstance(rec, dict):
+                continue
+            paper_id = rec.get("paper_id")
+            boxes = rec.get("boxes", [])
+            # If PDF path provided, try to load and map
+            doc = None
+            if pdf_path:
+                try:
+                    pdf_path = Path(pdf_path)
+                    doc = load_pdf(pdf_path)
+                except Exception:
+                    doc = None
+            for b in boxes:
+                page = b.get("page", 0)
+                bbox_pdf = b.get("bbox_pdf")  # expected [x0,y0,x1,y1] in PDF pts
+                cls = b.get("cls", "display")
+                # Map PDF bbox to pixels
+                if doc and have_pdf_helpers and bbox_pdf:
+                    pdf2px, px2pdf = pdf_to_px_transform(doc, page)
+                    x0p, y0p = pdf2px(bbox_pdf[0], bbox_pdf[1])
+                    x1p, y1p = pdf2px(bbox_pdf[2], bbox_pdf[3])
+                else:
+                    # Fallback: assume bbox_pdf are pixel coords
+                    x0p, y0p, x1p, y1p = bbox_pdf
+
+                # Determine image filename (try page_images_dir)
+                if page_images_dir:
+                    img_path = Path(page_images_dir) / f"page_{page:04d}.png"
+                else:
+                    # fallback: name by paper and page
+                    img_path = Path(f"{paper_id}_page_{page:04d}.png")
+
+                # create image record if not exists
+                if str(img_path) not in image_id_map:
+                    if img_path.exists():
+                        with Image.open(img_path) as im:
+                            w,h = im.size
                     else:
-                        # Fallback: assume bbox_pdf are pixel coords
-                        x0p, y0p, x1p, y1p = bbox_pdf
+                        # fallback sizes if image not available
+                        w,h = int(x1p)+10, int(y1p)+10
+                    add_image_record(str(img_path), w, h)
 
-                    # Determine image filename (try page_images_dir)
-                    if page_images_dir:
-                        img_path = Path(page_images_dir) / f"page_{page:04d}.png"
-                    else:
-                        # fallback: name by paper and page
-                        img_path = Path(f"{paper_id}_page_{page:04d}.png")
+                img_id = image_id_map[str(img_path)]
+                coco_bbox = bbox_to_coco(float(x0p), float(y0p), float(x1p), float(y1p))
+                # category id mapping - use class name if present
+                if isinstance(cls, str):
+                    cat_id = cat_name_to_id.get(cls, 1)
+                else:
+                    cat_id = int(cls)+1
 
-                    # create image record if not exists
-                    if str(img_path) not in image_id_map:
-                        if img_path.exists():
-                            with Image.open(img_path) as im:
-                                w,h = im.size
-                        else:
-                            # fallback sizes if image not available
-                            w,h = int(x1p)+10, int(y1p)+10
-                        add_image_record(str(img_path), w, h)
-
-                    img_id = image_id_map[str(img_path)]
-                    coco_bbox = bbox_to_coco(float(x0p), float(y0p), float(x1p), float(y1p))
-                    # category id mapping - use class name if present
-                    if isinstance(cls, str):
-                        cat_id = cat_name_to_id.get(cls, 1)
-                    else:
-                        cat_id = int(cls)+1
-
-                    ann = {
-                        "id": next_ann_id,
-                        "image_id": img_id,
-                        "category_id": cat_id,
-                        "bbox": coco_bbox,
-                        "area": coco_bbox[2]*coco_bbox[3],
-                        "iscrowd": 0,
-                        "segmentation": []
-                    }
-                    annotations.append(ann)
-                    next_ann_id += 1
+                ann = {
+                    "id": next_ann_id,
+                    "image_id": img_id,
+                    "category_id": cat_id,
+                    "bbox": coco_bbox,
+                    "area": coco_bbox[2]*coco_bbox[3],
+                    "iscrowd": 0,
+                    "segmentation": []
+                }
+                annotations.append(ann)
+                next_ann_id += 1
 
     coco = build_coco(images_info, annotations, categories)
     out_path = Path(out_annotations_path)

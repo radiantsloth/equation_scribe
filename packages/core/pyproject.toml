@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "equation-scribe-core"
+version = "0.0.1"
+description = "Shared core models and infrastructure for Equation Scribe"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Team Spangler"}]
+dependencies = [
+    "portalocker>=2.8.0",
+    "pydantic>=2.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
