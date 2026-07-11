@@ -120,14 +120,16 @@ def write_jsonl(path: Path, records: Iterable[Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Serialize all records first to prevent partial/corrupted writes if serialization fails
+    serialized_lines = [_serialize_record(r) + "\n" for r in records]
+
     mode = "r+" if path.exists() else "w+"
     with path.open(mode, encoding="utf-8") as fh:
         portalocker.lock(fh, portalocker.LOCK_EX)
         try:
             fh.seek(0)
             fh.truncate()
-            for record in records:
-                fh.write(_serialize_record(record) + "\n")
+            fh.writelines(serialized_lines)
             fh.flush()
             os.fsync(fh.fileno())
         finally:
