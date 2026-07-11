@@ -79,13 +79,16 @@ def save_index(root: Path, index: PaperIndex | Mapping[str, Any]) -> None:
     idx_path = Path(root) / INDEX_FILENAME
     idx_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Serialize first to avoid truncating the file if serialization fails
+    serialized_data = json.dumps(model.model_dump(mode="json"), ensure_ascii=False, indent=2)
+
     mode = "r+" if idx_path.exists() else "w+"
     with idx_path.open(mode, encoding="utf-8") as fh:
         portalocker.lock(fh, portalocker.LOCK_EX)
         try:
             fh.seek(0)
             fh.truncate()
-            fh.write(json.dumps(model.model_dump(mode="json"), ensure_ascii=False, indent=2))
+            fh.write(serialized_data)
             fh.flush()
             os.fsync(fh.fileno())
         finally:
