@@ -1,12 +1,11 @@
 # Equation Scribe
 
-Equation Scribe is a PDF equation annotation and training toolkit. It has two
-main surfaces:
+Equation Scribe is a PDF equation annotation and training toolkit. The purpose is to vet papers for use in a RAG. It has two main functions:
 
-- a web app for uploading PDFs, reviewing detected equations, editing boxes,
+- Detector and recognition utilities for generating data, preparing datasets,
+  and training models for recognizing equations in PDFs
+- A web app for uploading PDFs, reviewing detected equations, editing boxes,
   validating LaTeX, and saving paper profiles
-- detector and recognition utilities for generating data, preparing datasets,
-  and training models
 
 Shared storage, models, index management, runtime settings, and path utilities
 now live in `packages/core` under the `equation_scribe_core` package.
@@ -39,7 +38,7 @@ without relying on ad hoc `PYTHONPATH` setup.
 
 If you prefer Conda, the repo also includes `environment.yml`:
 
-```powershell
+```conda
 conda env create -f environment.yml -n eqscribe
 conda activate eqscribe
 python -m pip install -e .
@@ -58,7 +57,7 @@ Some training and rendering paths depend on packages that are not installed by
 
 Example:
 
-```powershell
+```conda
 python -m pip install ultralytics matplotlib pdf2image pytesseract
 ```
 
@@ -76,7 +75,7 @@ Depending on which workflows you use, you may also need:
 
 You can check the local environment with:
 
-```powershell
+```conda
 python tools/check_prereqs.py
 ```
 
@@ -136,17 +135,38 @@ Vite runs on `http://127.0.0.1:5173`, which matches the hardcoded API target in
 ### Backend Endpoints In Current Use
 
 - `POST /upload`
+  Uploads a PDF into `PAPERS_ROOT`, derives a `paper_id` from the filename, and
+  returns that `paper_id` so the frontend can load the paper.
 - `GET /papers/index`
+  Returns the shared `index.json` contents as JSON so clients can inspect the
+  known paper/profile registry.
 - `GET /papers/{paper_id}/pages`
+  Returns the page count for one uploaded PDF.
 - `GET /papers/{paper_id}/page/{idx}/image`
+  Renders one PDF page as a PNG for display in the frontend canvas.
 - `GET /papers/{paper_id}/page/{idx}/meta`
+  Returns page metadata used by the frontend to align PDF-space boxes with the
+  rendered page image.
 - `GET /papers/{paper_id}/equations`
+  Loads the saved `equations.jsonl` profile for a paper and returns its records.
 - `POST /papers/{paper_id}/equations`
+  Appends a new equation record to the paper profile. The record must include at
+  least one box.
 - `PUT /papers/{paper_id}/equations/{eq_uid}`
+  Rewrites an existing equation record identified by `eq_uid`.
 - `DELETE /papers/{paper_id}/equations/{eq_uid}`
+  Removes an existing equation record. The backend returns `404` if the record
+  does not exist.
 - `POST /validate`
+  Validates a LaTeX string and returns parser/validation results for the editor
+  workflow.
 - `POST /papers/{paper_id}/rescan_box`
+  Crops a user-selected PDF region and runs the recognition model to propose a
+  LaTeX string for that one box.
 - `POST /papers/{paper_id}/autodetect_all`
+  Runs detector inference across the full uploaded paper, deduplicates
+  overlapping results, and appends the detected equations into the saved paper
+  profile.
 
 ## Detector Training Workflow
 
@@ -161,7 +181,7 @@ The training path in this repo is:
 
 ### 1. Generate Synthetic Data
 
-```powershell
+```conda
 python -m equation_scribe.detector.synthetic_coco `
   --out-images detector/data/images/synth `
   --out-anns detector/data/annotations/instances_all.json `
@@ -180,11 +200,11 @@ Notes:
 
 ### 2. Split Train / Validation By Paper
 
-```powershell
-python -m equation_scribe.detector.split_coco_by_paper `
-  --coco detector/data/annotations/instances_all.json `
-  --out-dir detector/data/annotations `
-  --val-frac 0.2 `
+```conda
+python -m equation_scribe.detector.split_coco_by_paper ^
+  --coco detector/data/annotations/instances_all.json ^
+  --out-dir detector/data/annotations ^
+  --val-frac 0.2 ^
   --seed 0
 ```
 
@@ -197,11 +217,11 @@ This produces:
 
 If you want a more scan-like image set before tiling:
 
-```powershell
-python -m equation_scribe.detector.preprocess `
-  --input detector/data/images/synth `
-  --output detector/data/images/synth_pre `
-  --denoise --deskew --clahe --binarize
+```conda
+python -m equation_scribe.detector.preprocess ^
+  --input detector/data/images/synth ^
+  --output detector/data/images/synth_pre ^
+  --denoise --deskew --clahe --binarize 
 ```
 
 If you skip this step, use `detector/data/images/synth` as the image root in
@@ -209,35 +229,35 @@ the tiling step below.
 
 ### 4. Tile The Train And Validation Sets
 
-```powershell
-python -m equation_scribe.detector.tiling `
-  --coco detector/data/annotations/instances_train.json `
-  --images-root detector/data/images/synth_pre `
-  --out-images detector/data/images/tiles_train `
-  --out-annotations detector/data/annotations/instances_tiles_train.json `
-  --tile-size 1024 `
+```conda
+python -m equation_scribe.detector.tiling ^
+  --coco detector/data/annotations/instances_train.json ^
+  --images-root detector/data/images/synth_pre ^
+  --out-images detector/data/images/tiles_train ^
+  --out-annotations detector/data/annotations/instances_tiles_train.json ^
+  --tile-size 1024 ^
   --stride 512
 
-python -m equation_scribe.detector.tiling `
-  --coco detector/data/annotations/instances_val.json `
-  --images-root detector/data/images/synth_pre `
-  --out-images detector/data/images/tiles_val `
-  --out-annotations detector/data/annotations/instances_tiles_val.json `
-  --tile-size 1024 `
+python -m equation_scribe.detector.tiling ^
+  --coco detector/data/annotations/instances_val.json ^
+  --images-root detector/data/images/synth_pre ^
+  --out-images detector/data/images/tiles_val ^
+  --out-annotations detector/data/annotations/instances_tiles_val.json ^
+  --tile-size 1024 ^
   --stride 512
 ```
 
 ### 5. Convert Tiled COCO To YOLO Labels
 
-```powershell
-python tools/convert_coco_to_yolo.py `
-  --coco detector/data/annotations/instances_tiles_train.json `
-  --dataset-root detector/data `
+```conda
+python tools/convert_coco_to_yolo.py ^
+  --coco detector/data/annotations/instances_tiles_train.json ^
+  --dataset-root detector/data ^
   --out-labels detector/data/labels
 
-python tools/convert_coco_to_yolo.py `
-  --coco detector/data/annotations/instances_tiles_val.json `
-  --dataset-root detector/data `
+python tools/convert_coco_to_yolo.py ^
+  --coco detector/data/annotations/instances_tiles_val.json ^
+  --dataset-root detector/data ^
   --out-labels detector/data/labels
 ```
 
@@ -260,13 +280,13 @@ names:
 
 ### 7. Train YOLO
 
-```powershell
-yolo task=detect mode=train `
-  model=yolov8s.pt `
-  data=equation_scribe/detector/detector.yaml `
-  epochs=5 `
-  imgsz=1024 `
-  batch=4 `
+```conda
+yolo task=detect mode=train ^
+  model=yolov8s.pt ^
+  data=equation_scribe/detector/detector.yaml ^
+  epochs=5 ^
+  imgsz=1024 ^
+  batch=4 ^
   name=eq_detector_quick
 ```
 
@@ -275,10 +295,10 @@ Ultralytics install instead.
 
 ### 8. Run Detector Inference
 
-```powershell
-python -m equation_scribe.detector.inference `
-  --model runs/detect/eq_detector_quick/weights/best.pt `
-  --image detector/data/images/synth_pre/paper000_page_0000.png `
+```conda
+python -m equation_scribe.detector.inference ^
+  --model runs/detect/eq_detector_quick/weights/best.pt ^
+  --image detector/data/images/synth_pre/paper000_page_0000.png ^
   --conf 0.25
 ```
 
@@ -286,12 +306,12 @@ python -m equation_scribe.detector.inference `
 
 The heuristic autodetector remains available as a repo-local CLI:
 
-```powershell
-python -m equation_scribe.autodetect_equations `
-  --pdf "C:\path\to\papers\MyPaper.pdf" `
-  --paper-id "MyPaper" `
-  --data-root "C:\path\to\profiles" `
-  --min-score 0.6 `
+```conda
+python -m equation_scribe.autodetect_equations ^
+  --pdf "C:\path\to\papers\MyPaper.pdf" ^
+  --paper-id "MyPaper" ^
+  --data-root "C:\path\to\profiles" ^
+  --min-score 0.6 ^
   --force
 ```
 
@@ -306,14 +326,14 @@ the migration.
 ## Useful Scripts
 
 - `python tools/check_prereqs.py` verify local binaries and Python packages
-- `powershell -ExecutionPolicy Bypass -File .\tools\run_demo.ps1` smoke test
+- `conda -ExecutionPolicy Bypass -File .\tools\run_demo.ps1` smoke test
   the synthetic-data and detector pipeline
 
 ## Testing
 
 Run the full test suite from the repo root:
 
-```powershell
+```conda
 python -m pytest -q
 ```
 

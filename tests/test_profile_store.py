@@ -69,6 +69,19 @@ def test_delete_equation_removes_record_and_creates_backup(tmp_path: Path):
     assert len(backups) == 1
 
 
+def test_delete_equation_no_match_does_not_create_backup(tmp_path: Path):
+    root = tmp_path / "profiles"
+    append_equation(root, {"eq_uid": "keep", "paper_id": "paper-1", "latex": "y", "boxes": []})
+
+    removed = delete_equation(root, "paper-1", "missing")
+
+    assert removed is False
+    assert read_equations(root, "paper-1") == [
+        {"eq_uid": "keep", "paper_id": "paper-1", "latex": "y", "boxes": []}
+    ]
+    assert not (root / "paper-1" / "history").exists()
+
+
 def test_save_equation_legacy_wrapper_accepts_explicit_paper_id(tmp_path: Path):
     root = tmp_path / "profiles"
 

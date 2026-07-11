@@ -114,7 +114,6 @@ def delete_equation(root: Path, paper_id: str, eq_uid: str) -> bool:
     """
 
     path = equations_path(root, paper_id)
-    backup_profile_file(path.parent)
     if not path.exists():
         return False
 
@@ -133,5 +132,6 @@ def delete_equation(root: Path, paper_id: str, eq_uid: str) -> bool:
     if not removed:
         return False
 
+    backup_profile_file(path.parent)
     rewrite_jsonl(path, lines)
     return True
