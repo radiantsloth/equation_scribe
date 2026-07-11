@@ -27,8 +27,8 @@ If you prefer to render PDFs to images, provide `--pdf-root` (where source PDFs 
 and `--render-pdf` will be used to generate page images into page-images-dir/<paper_id>/page_0001.png.
 
 """
-import json
 import argparse
+import importlib
 from pathlib import Path
 from PIL import Image
 import time
@@ -38,11 +38,22 @@ import tempfile
 import sys
 from typing import List, Dict, Tuple, Optional
 
-# Optional dependency for PDF rendering
 try:
-    from pdf2image import convert_from_path
+    from equation_scribe_core.io import read_jsonl
+except ModuleNotFoundError:
+    core_src = Path(__file__).resolve().parents[2] / "packages" / "core" / "src"
+    if str(core_src) not in sys.path:
+        sys.path.insert(0, str(core_src))
+    from equation_scribe_core.io import read_jsonl
+import json
+
+# Optional dependency for PDF rendering. Load it dynamically so editor static
+# analysis does not treat it as a required workspace dependency.
+try:
+    convert_from_path = importlib.import_module("pdf2image").convert_from_path
     HAVE_PDF2IMAGE = True
 except Exception:
+    convert_from_path = None
     HAVE_PDF2IMAGE = False
 
 # Try to import your repo's pdf helpers
@@ -200,129 +211,127 @@ def convert_profiles_to_coco(
                 doc = None
 
         # Read equations.jsonl
-        with eq_file.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                if not line.strip():
+        for rec in read_jsonl(eq_file):
+            if not isinstance(rec, dict):
+                continue
+            boxes = rec.get("boxes", [])
+            for box in boxes:
+                page_idx = int(box.get("page", 0))
+                bbox_pdf = box.get("bbox_pdf")
+                if not bbox_pdf:
                     continue
-                rec = json.loads(line)
-                boxes = rec.get("boxes", [])
-                for box in boxes:
-                    page_idx = int(box.get("page", 0))
-                    bbox_pdf = box.get("bbox_pdf")
-                    if not bbox_pdf:
-                        continue
-                    # Determine image path (priority):
-                    # 1) images_folder_for_paper / page_{page_idx:04d}.png
-                    # 2) images_folder_for_paper / <paper>_page_{page_idx:04d}.png
-                    # 3) fallback: paper_id + page
-                    img_path_candidates = []
-                    if images_folder_for_paper:
-                        img_path_candidates.append(images_folder_for_paper / f"page_{page_idx:04d}.png")
-                        img_path_candidates.append(images_folder_for_paper / f"{paper_id}_page_{page_idx:04d}.png")
-                    # also check paper_dir/images/page_0000.png
-                    maybe_local = paper_dir / "images" / f"page_{page_idx:04d}.png"
-                    img_path_candidates.append(maybe_local)
-                    chosen_img = None
-                    for p in img_path_candidates:
-                        if p and p.exists():
-                            chosen_img = p
-                            break
+                # Determine image path (priority):
+                # 1) images_folder_for_paper / page_{page_idx:04d}.png
+                # 2) images_folder_for_paper / <paper>_page_{page_idx:04d}.png
+                # 3) fallback: paper_id + page
+                img_path_candidates = []
+                if images_folder_for_paper:
+                    img_path_candidates.append(images_folder_for_paper / f"page_{page_idx:04d}.png")
+                    img_path_candidates.append(images_folder_for_paper / f"{paper_id}_page_{page_idx:04d}.png")
+                # also check paper_dir/images/page_0000.png
+                maybe_local = paper_dir / "images" / f"page_{page_idx:04d}.png"
+                img_path_candidates.append(maybe_local)
+                chosen_img = None
+                for p in img_path_candidates:
+                    if p and p.exists():
+                        chosen_img = p
+                        break
 
-                    # If not found and doc is available, we can render just this page to a temp image
-                    temp_image = None
-                    if not chosen_img and doc:
-                        # render a single page using pdf2image (if available)
-                        if HAVE_PDF2IMAGE:
-                            tmp_folder = Path("detector/data/images/_tmp") / paper_id
-                            tmp_folder.mkdir(parents=True, exist_ok=True)
-                            try:
-                                pages = convert_from_path(str(pdf_candidate), dpi=dpi, first_page=page_idx+1, last_page=page_idx+1)
-                                # pages list should have one image
-                                tmp_file = tmp_folder / f"page_{page_idx:04d}.png"
-                                pages[0].save(tmp_file)
-                                chosen_img = tmp_file
-                                temp_image = tmp_file
-                            except Exception as e:
-                                print("Warning: failed to render page", e)
-                                chosen_img = None
-
-                    # If still not found, create a synthetic image size fallback
-                    if not chosen_img:
-                        # we'll create a dummy image size large enough to include bbox
-                        # assume bbox_pdf is in pixel coords as last resort
-                        x0p, y0p, x1p, y1p = bbox_pdf
-                        width = int(max(1024, math.ceil(x1p + 10)))
-                        height = int(max(1024, math.ceil(y1p + 10)))
-                        # create a small temp image
-                        tmp_folder = Path("detector/data/images/_generated")
+                # If not found and doc is available, we can render just this page to a temp image
+                temp_image = None
+                if not chosen_img and doc:
+                    # render a single page using pdf2image (if available)
+                    if HAVE_PDF2IMAGE:
+                        tmp_folder = Path("detector/data/images/_tmp") / paper_id
                         tmp_folder.mkdir(parents=True, exist_ok=True)
-                        chosen_img = tmp_folder / f"{paper_id}_page_{page_idx:04d}.png"
-                        if not chosen_img.exists():
-                            from PIL import Image, ImageDraw
-                            im = Image.new("RGB", (width, height), "white")
-                            im.save(chosen_img)
-
-                    # At this point chosen_img exists
-                    img_w, img_h = load_page_image_size(chosen_img)
-                    # Convert PDF bbox to pixel bbox
-                    # Prefer using repo pdf helpers if doc was available
-                    if doc and HAVE_PDF_HELPERS:
                         try:
-                            pdf2px, px2pdf = pdf_to_px_transform(doc, page_idx)
-                            # pdf2px expects (x_pt, y_pt) and returns pixel coords
-                            x0_px, y0_px = pdf2px(bbox_pdf[0], bbox_pdf[1])
-                            x1_px, y1_px = pdf2px(bbox_pdf[2], bbox_pdf[3])
-                        except Exception:
-                            # fallback to generic conversion
-                            x0_px, y0_px, x1_px, y1_px = pdf_bbox_to_pixel_bbox_fallback(bbox_pdf, img_w, img_h)
-                    else:
-                        # fallback conversion
+                            pages = convert_from_path(str(pdf_candidate), dpi=dpi, first_page=page_idx+1, last_page=page_idx+1)
+                            # pages list should have one image
+                            tmp_file = tmp_folder / f"page_{page_idx:04d}.png"
+                            pages[0].save(tmp_file)
+                            chosen_img = tmp_file
+                            temp_image = tmp_file
+                        except Exception as e:
+                            print("Warning: failed to render page", e)
+                            chosen_img = None
+
+                # If still not found, create a synthetic image size fallback
+                if not chosen_img:
+                    # we'll create a dummy image size large enough to include bbox
+                    # assume bbox_pdf is in pixel coords as last resort
+                    x0p, y0p, x1p, y1p = bbox_pdf
+                    width = int(max(1024, math.ceil(x1p + 10)))
+                    height = int(max(1024, math.ceil(y1p + 10)))
+                    # create a small temp image
+                    tmp_folder = Path("detector/data/images/_generated")
+                    tmp_folder.mkdir(parents=True, exist_ok=True)
+                    chosen_img = tmp_folder / f"{paper_id}_page_{page_idx:04d}.png"
+                    if not chosen_img.exists():
+                        from PIL import Image, ImageDraw
+                        im = Image.new("RGB", (width, height), "white")
+                        im.save(chosen_img)
+
+                # At this point chosen_img exists
+                img_w, img_h = load_page_image_size(chosen_img)
+                # Convert PDF bbox to pixel bbox
+                # Prefer using repo pdf helpers if doc was available
+                if doc and HAVE_PDF_HELPERS:
+                    try:
+                        pdf2px, px2pdf = pdf_to_px_transform(doc, page_idx)
+                        # pdf2px expects (x_pt, y_pt) and returns pixel coords
+                        x0_px, y0_px = pdf2px(bbox_pdf[0], bbox_pdf[1])
+                        x1_px, y1_px = pdf2px(bbox_pdf[2], bbox_pdf[3])
+                    except Exception:
+                        # fallback to generic conversion
                         x0_px, y0_px, x1_px, y1_px = pdf_bbox_to_pixel_bbox_fallback(bbox_pdf, img_w, img_h)
+                else:
+                    # fallback conversion
+                    x0_px, y0_px, x1_px, y1_px = pdf_bbox_to_pixel_bbox_fallback(bbox_pdf, img_w, img_h)
 
-                    # Normalize & clip to image bounds
-                    x0_px = max(0.0, min(x0_px, img_w-1))
-                    y0_px = max(0.0, min(y0_px, img_h-1))
-                    x1_px = max(0.0, min(x1_px, img_w-1))
-                    y1_px = max(0.0, min(y1_px, img_h-1))
-                    # Ensure valid
-                    if x1_px <= x0_px or y1_px <= y0_px:
-                        # skip invalid boxes
-                        continue
+                # Normalize & clip to image bounds
+                x0_px = max(0.0, min(x0_px, img_w-1))
+                y0_px = max(0.0, min(y0_px, img_h-1))
+                x1_px = max(0.0, min(x1_px, img_w-1))
+                y1_px = max(0.0, min(y1_px, img_h-1))
+                # Ensure valid
+                if x1_px <= x0_px or y1_px <= y0_px:
+                    # skip invalid boxes
+                    continue
 
-                    fname_rel = str(chosen_img)
-                    if fname_rel not in image_id_map:
-                        img_id = add_image_record(fname_rel, img_w, img_h)
-                    else:
-                        img_id = image_id_map[fname_rel]
+                fname_rel = str(chosen_img)
+                if fname_rel not in image_id_map:
+                    img_id = add_image_record(fname_rel, img_w, img_h)
+                else:
+                    img_id = image_id_map[fname_rel]
 
-                    # Determine category id
-                    clsname = box.get("cls", None) or box.get("class", None) or box.get("type", None)
-                    if isinstance(clsname, str):
-                        cat_id = cat_name_to_id.get(clsname, 1)
-                    else:
-                        # If numeric class present (0/1), map to ids (1-based)
-                        try:
-                            cat_id = int(box.get("cls", 0)) + 1
-                        except Exception:
-                            cat_id = 1
+                # Determine category id
+                clsname = box.get("cls", None) or box.get("class", None) or box.get("type", None)
+                if isinstance(clsname, str):
+                    cat_id = cat_name_to_id.get(clsname, 1)
+                else:
+                    # If numeric class present (0/1), map to ids (1-based)
+                    try:
+                        cat_id = int(box.get("cls", 0)) + 1
+                    except Exception:
+                        cat_id = 1
 
-                    coco_bbox = bbox_to_coco(x0_px, y0_px, x1_px, y1_px)
-                    ann = {
-                        "id": next_ann_id,
-                        "image_id": img_id,
-                        "category_id": cat_id,
-                        "bbox": coco_bbox,
-                        "area": coco_bbox[2] * coco_bbox[3],
-                        "iscrowd": 0,
-                        "segmentation": []
-                    }
-                    annotations.append(ann)
-                    next_ann_id += 1
+                coco_bbox = bbox_to_coco(x0_px, y0_px, x1_px, y1_px)
+                ann = {
+                    "id": next_ann_id,
+                    "image_id": img_id,
+                    "category_id": cat_id,
+                    "bbox": coco_bbox,
+                    "area": coco_bbox[2] * coco_bbox[3],
+                    "iscrowd": 0,
+                    "segmentation": []
+                }
+                annotations.append(ann)
+                next_ann_id += 1
 
-                    # cleanup temp image if any
-                    if temp_image and temp_image.exists():
-                        # keep rendered tmp pages if you want; for now leave them
-                        pass
+                # cleanup temp image if any
+                if temp_image and temp_image.exists():
+                    # keep rendered tmp pages if you want; for now leave them
+                    pass
 
     coco = build_coco(images_info, annotations, categories)
     out_annotations.parent.mkdir(parents=True, exist_ok=True)

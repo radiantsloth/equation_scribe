@@ -1,4 +1,7 @@
 {
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/packages/core/src"
+    ],
     "python.testing.pytestArgs": [
         "tests"
     ],
